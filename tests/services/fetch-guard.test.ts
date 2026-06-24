@@ -7,9 +7,21 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchPdfGuarded, isBlockedIp } from '@/services/document/fetch-guard.js';
+
+/** Keys an upstream HTTP error must never leak onto the client-facing error `data`. */
+const LEAK_KEYS = [
+  'statusCode',
+  'statusText',
+  'responseBody',
+  'requestId',
+  'operation',
+  'retryAfter',
+  'url',
+] as const;
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
 
@@ -237,6 +249,90 @@ describe('fetchPdfGuarded response handling (stubbed fetch)', () => {
     await expect(fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx)).rejects.toMatchObject({
       data: { reason: 'source_unfetchable' },
     });
+  });
+});
+
+/**
+ * Error-leak defense: the guard must never surface raw upstream internals
+ * (statusCode, responseBody, requestId, the request URL) to the client. Whatever
+ * the underlying fetch throws — a raw network rejection or a status-mapped
+ * framework McpError carrying those internals in `data` — the client-facing error
+ * must be the clean `source_unfetchable` shape, with the original confined to
+ * `cause` (server-side logs only).
+ */
+describe('fetchPdfGuarded error-leak defense (stubbed fetch)', () => {
+  const PUBLIC = 'https://93.184.216.34/form.pdf';
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('normalizes a raw network rejection to a clean source_unfetchable error', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed: ECONNRESET'));
+    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.data).toMatchObject({ reason: 'source_unfetchable' });
+    for (const key of LEAK_KEYS) expect(err.data).not.toHaveProperty(key);
+  });
+
+  it('detects a framework McpError structurally and strips its upstream internals', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    // Exactly what the framework's fetchWithTimeout throws on a non-2xx upstream:
+    // a status-mapped McpError whose `data` carries statusCode / responseBody /
+    // requestId / the internal request URL. None may reach the client.
+    fetchMock.mockRejectedValueOnce(
+      new McpError(
+        JsonRpcErrorCode.Forbidden,
+        'Fetch failed for https://internal.svc/secret. Status: 403',
+        {
+          requestId: 'req-abc-123',
+          operation: 'fetch GET https://internal.svc/secret',
+          statusCode: 403,
+          statusText: 'Forbidden',
+          responseBody: '<html><body>Internal access token: sk-LEAKED-9f8e7d</body></html>',
+          errorSource: 'FetchHttpError',
+        },
+      ),
+    );
+
+    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(err.data).toMatchObject({ reason: 'source_unfetchable' });
+    // The client-facing `data` must carry NONE of the upstream internals.
+    for (const key of LEAK_KEYS) expect(err.data).not.toHaveProperty(key);
+    // Neither the leaked body, the internal host, nor the status text may appear
+    // anywhere in the client-facing message or serialized data.
+    const surface = `${err.message} ${JSON.stringify(err.data)}`;
+    expect(surface).not.toContain('internal.svc');
+    expect(surface).not.toContain('sk-LEAKED');
+    expect(surface).not.toContain('responseBody');
+    expect(surface).not.toContain('403');
+    // The original (with internals) is retained as `cause` for server-side logs.
+    expect(err.cause).toBeInstanceOf(McpError);
+    expect((err.cause as McpError).data).toMatchObject({ statusCode: 403 });
+  });
+
+  it('maps caller cancellation to a clean source_unfetchable error', async () => {
+    const controller = new AbortController();
+    const ctx = createMockContext({ tenantId: 't1', signal: controller.signal });
+    fetchMock.mockImplementationOnce(() => {
+      controller.abort();
+      return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+    });
+    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err.data).toMatchObject({ reason: 'source_unfetchable' });
+    for (const key of LEAK_KEYS) expect(err.data).not.toHaveProperty(key);
   });
 });
 

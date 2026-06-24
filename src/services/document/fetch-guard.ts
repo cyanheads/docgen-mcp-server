@@ -4,17 +4,35 @@
  * destinations by resolving DNS and checking the resolved IP (not just the
  * hostname), follows redirects up to a fixed limit while re-validating each hop,
  * verifies `application/pdf`, and caps the response body at the configured byte
- * ceiling before buffering.
+ * ceiling before buffering. Every failure path — including a raw network
+ * rejection or a status-mapped framework `McpError` whose `data` carries upstream
+ * internals (statusCode, responseBody, requestId, the request URL) — is caught and
+ * re-thrown as a clean `source_unfetchable` domain error so none of those internals
+ * reach the client; the original rides as `cause` for server-side logs only.
  * @module services/document/fetch-guard
  */
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 
 const MAX_REDIRECTS = 3;
 const FETCH_REASON = 'source_unfetchable';
+
+/**
+ * True for an error this guard itself raised — its `data.reason` is already the
+ * leak-free `source_unfetchable` shape (`{ reason, recovery }`). Detected
+ * structurally, never by message string, so re-throwing it as-is is safe.
+ */
+function isGuardError(err: unknown): err is McpError {
+  return (
+    err instanceof McpError &&
+    typeof err.data === 'object' &&
+    err.data !== null &&
+    (err.data as { reason?: unknown }).reason === FETCH_REASON
+  );
+}
 
 /**
  * Parses an IPv4 dotted-quad into its 32-bit integer form, or `null` if it is
@@ -120,7 +138,8 @@ async function assertHostAllowed(hostname: string, ctx: Context): Promise<void> 
  * scheme, blocked destination, non-2xx status, wrong content-type, oversized
  * body, or too many redirects. Manual redirect following re-runs the full guard
  * on every hop. Honors `ctx.signal` and the configured render timeout via an
- * AbortController.
+ * AbortController. A raw `fetch` rejection or a status-mapped framework `McpError`
+ * is caught and normalized to the same leak-free `source_unfetchable` error.
  */
 export async function fetchPdfGuarded(
   rawUrl: string,
@@ -137,7 +156,11 @@ export async function fetchPdfGuarded(
   const controller = new AbortController();
   const onAbort = () => controller.abort();
   ctx.signal.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
 
   try {
     let currentUrl = rawUrl;
@@ -190,6 +213,30 @@ export async function fetchPdfGuarded(
     }
 
     throw fail('too many redirects');
+  } catch (err) {
+    // Guard-raised errors already carry the leak-free source_unfetchable shape —
+    // re-throw untouched.
+    if (isGuardError(err)) throw err;
+
+    // The render timeout or caller cancellation tripped the AbortController.
+    if (timedOut) throw fail('the fetch exceeded the time budget');
+    if (ctx.signal.aborted)
+      throw serviceUnavailable('The source PDF fetch was cancelled.', {
+        reason: FETCH_REASON,
+        ...ctx.recoveryFor(FETCH_REASON),
+      });
+
+    // Anything else — a raw network rejection (TypeError, TLS/connection reset,
+    // DNS race) or a status-mapped framework McpError whose `data` carries raw
+    // upstream internals (statusCode, responseBody, requestId, the internal URL).
+    // Detected structurally; never surfaced. Re-throw the clean domain error and
+    // keep the original as `cause` so only the server-side log sees the internals.
+    const cause = err instanceof Error ? err : undefined;
+    throw serviceUnavailable(
+      'Could not fetch the source PDF: the request failed before a response was received.',
+      { reason: FETCH_REASON, ...ctx.recoveryFor(FETCH_REASON) },
+      cause ? { cause } : undefined,
+    );
   } finally {
     clearTimeout(timer);
     ctx.signal.removeEventListener('abort', onAbort);
