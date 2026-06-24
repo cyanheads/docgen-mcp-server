@@ -1,25 +1,25 @@
 {
   "name": "docgen-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/docgen-mcp-server",
+  "repository": "https://github.com/cyanheads/docgen-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "pdf", "xlsx", "document-generation"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "docgen-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
-    "capabilities": ["Read"],
-    "websiteURL": "",
+    "shortDescription": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
+    "longDescription": "docgen-mcp-server is the renderer that closes the gap between what an agent can write and the binary file a human downloads. It exposes docgen_render_pdf (HTML, markdown, or a {{key}} template + data → PDF), docgen_export_spreadsheet (named row sheets → xlsx with a column spec), docgen_fill_form (fill and optionally flatten an AcroForm PDF supplied as base64 or an SSRF-guarded https URL), and docgen_get_document (re-fetch a rendered document by id). Outputs are stored tenant-scoped with a short TTL and delivered as a download URL (hosted) or inline base64 (stdio), with a docgen://document/{id} resource as the stable-URI twin.",
+    "developerName": "cyanheads",
+    "category": "productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/cyanheads/docgen-mcp-server",
     "defaultPrompt": []
   }
 }

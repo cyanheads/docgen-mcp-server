@@ -2,8 +2,10 @@
   "manifest_version": "0.3",
   "name": "docgen-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
+  "author": { "name": "cyanheads" },
+  "homepage": "https://github.com/cyanheads/docgen-mcp-server",
+  "repository": { "type": "git", "url": "https://github.com/cyanheads/docgen-mcp-server" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -13,7 +15,12 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "DOCGEN_DOCUMENT_TTL_SECONDS": "${user_config.DOCGEN_DOCUMENT_TTL_SECONDS}",
+        "DOCGEN_MAX_DOCUMENT_BYTES": "${user_config.DOCGEN_MAX_DOCUMENT_BYTES}",
+        "DOCGEN_RENDER_TIMEOUT_MS": "${user_config.DOCGEN_RENDER_TIMEOUT_MS}",
+        "DOCGEN_INLINE_MAX_BYTES": "${user_config.DOCGEN_INLINE_MAX_BYTES}",
+        "DOCGEN_PDF_ENGINE": "${user_config.DOCGEN_PDF_ENGINE}"
       }
     }
   },
@@ -22,5 +29,41 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "DOCGEN_DOCUMENT_TTL_SECONDS": {
+      "title": "Document TTL (seconds)",
+      "description": "How long a rendered document is retrievable before it expires.",
+      "type": "string",
+      "required": false,
+      "default": "900"
+    },
+    "DOCGEN_MAX_DOCUMENT_BYTES": {
+      "title": "Max document size (bytes)",
+      "description": "Hard ceiling on a single rendered artifact; exceeding it aborts the render.",
+      "type": "string",
+      "required": false,
+      "default": "26214400"
+    },
+    "DOCGEN_RENDER_TIMEOUT_MS": {
+      "title": "Render timeout (ms)",
+      "description": "Per-render wall-clock budget; exceeding it aborts the render.",
+      "type": "string",
+      "required": false,
+      "default": "30000"
+    },
+    "DOCGEN_INLINE_MAX_BYTES": {
+      "title": "Inline size limit (bytes)",
+      "description": "Artifacts at or under this size are returned inline as base64; larger ones omit it.",
+      "type": "string",
+      "required": false,
+      "default": "5242880"
+    },
+    "DOCGEN_PDF_ENGINE": {
+      "title": "PDF engine",
+      "description": "PDF rendering engine. Only 'lightweight' is implemented in v1.",
+      "type": "string",
+      "required": false,
+      "default": "lightweight"
+    }
+  }
 }

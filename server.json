@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "docgen-mcp-server",
-  "description": "",
+  "name": "io.github.cyanheads/docgen-mcp-server",
+  "description": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/docgen-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
@@ -31,6 +31,41 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "DOCGEN_DOCUMENT_TTL_SECONDS",
+          "description": "How long a rendered document is retrievable before it expires, in seconds.",
+          "format": "string",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "DOCGEN_MAX_DOCUMENT_BYTES",
+          "description": "Hard ceiling on a single rendered artifact in bytes; exceeding it aborts the render.",
+          "format": "string",
+          "isRequired": false,
+          "default": "26214400"
+        },
+        {
+          "name": "DOCGEN_RENDER_TIMEOUT_MS",
+          "description": "Per-render wall-clock budget in milliseconds; exceeding it aborts the render.",
+          "format": "string",
+          "isRequired": false,
+          "default": "30000"
+        },
+        {
+          "name": "DOCGEN_INLINE_MAX_BYTES",
+          "description": "Artifacts at or under this byte size are returned inline as base64; larger ones omit it.",
+          "format": "string",
+          "isRequired": false,
+          "default": "5242880"
+        },
+        {
+          "name": "DOCGEN_PDF_ENGINE",
+          "description": "PDF rendering engine. Only 'lightweight' is implemented; 'chromium' is reserved and rejected at startup.",
+          "format": "string",
+          "isRequired": false,
+          "default": "lightweight"
         }
       ],
       "transport": {
@@ -88,6 +123,41 @@
           "format": "string",
           "isRequired": false,
           "default": "info"
+        },
+        {
+          "name": "DOCGEN_DOCUMENT_TTL_SECONDS",
+          "description": "How long a rendered document is retrievable before it expires, in seconds.",
+          "format": "string",
+          "isRequired": false,
+          "default": "900"
+        },
+        {
+          "name": "DOCGEN_MAX_DOCUMENT_BYTES",
+          "description": "Hard ceiling on a single rendered artifact in bytes; exceeding it aborts the render.",
+          "format": "string",
+          "isRequired": false,
+          "default": "26214400"
+        },
+        {
+          "name": "DOCGEN_RENDER_TIMEOUT_MS",
+          "description": "Per-render wall-clock budget in milliseconds; exceeding it aborts the render.",
+          "format": "string",
+          "isRequired": false,
+          "default": "30000"
+        },
+        {
+          "name": "DOCGEN_INLINE_MAX_BYTES",
+          "description": "Artifacts at or under this byte size are returned inline as base64; larger ones omit it.",
+          "format": "string",
+          "isRequired": false,
+          "default": "5242880"
+        },
+        {
+          "name": "DOCGEN_PDF_ENGINE",
+          "description": "PDF rendering engine. Only 'lightweight' is implemented; 'chromium' is reserved and rejected at startup.",
+          "format": "string",
+          "isRequired": false,
+          "default": "lightweight"
         }
       ],
       "transport": {
