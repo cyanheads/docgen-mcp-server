@@ -11,35 +11,29 @@
 
 ---
 
-## First Session
+## What this server does
 
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
+docgen-mcp-server renders structured agent content into downloadable binary documents. The agent composes the content; the server prints the file a human downloads. Every render is stored tenant-scoped under a TTL and handed back as a `DocumentEnvelope` (a `documentId` + resource URI + inline base64 when small enough); a later call re-fetches it within the TTL.
 
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
+**Surface:**
 
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
+| Definition | Kind | What it does |
+|:-----------|:-----|:-------------|
+| `docgen_render_pdf` | tool | HTML / markdown / `{{template}}+data` → PDF (lightweight pdf-lib engine). Sets a `degraded` enrichment flag when it drops unsupported styling (CSS, images, scripts). |
+| `docgen_export_spreadsheet` | tool | One or more named row sheets → `.xlsx` (exceljs), with an optional per-column type/format spec. |
+| `docgen_fill_form` | tool | Fill (and optionally flatten) the AcroForm fields of a supplied PDF — source as `{ base64 }` or an `{ url }` fetched behind an SSRF guard. Unmatched field names come back in `unmatchedFields[]`. |
+| `docgen_get_document` | tool | Re-fetch a previously rendered document by its `documentId`. Pure read; `document_expired` once the TTL lapses. |
+| `docgen://document/{documentId}` | resource | The stable-URI delivery surface — a byte blob (real mime type) + a JSON metadata block. |
 
----
+**Services (`src/services/document/`):**
 
-## What's Next?
+- `render-service.ts` — the bundled rendering stack (PDF, xlsx, form-fill); enforces the byte ceiling + per-render timeout and classifies failures into the typed reasons the tools declare.
+- `document-store.ts` — mints opaque ids, persists bytes + metadata via tenant-scoped `ctx.state` under a shared TTL, builds the envelope. A leaked id never crosses the tenant boundary.
+- `fetch-guard.ts` — SSRF-guarded PDF fetcher for the `fill_form` URL source: https-only, blocks private/loopback/link-local/metadata destinations by resolving DNS and checking the resolved IP, re-validates every redirect hop, enforces `application/pdf`, caps the body. Every failure path is normalized to a leak-free `source_unfetchable` error.
+- `html-blocks.ts` — reduces HTML/markdown to a linear block model for the lightweight engine (no JS execution, no remote-resource fetch); flags `degraded` for anything it can't render.
+- `format-envelope.ts` / `types.ts` / `render-types.ts` — the shared `DocumentEnvelope` formatter, domain types, and render-input schemas.
 
-When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
-
-1. **Re-run the `setup` skill** — ensures CLAUDE.md, skills, structure, and metadata are populated and up to date with the current codebase
-2. **Run the `design-mcp-server` skill** — if the tool/resource surface hasn't been mapped yet, work through domain design
-3. **Add tools/resources/prompts** — scaffold new definitions using the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt` skills
-4. **Add services** — scaffold domain service integrations using the `add-service` skill
-5. **Add tests** — scaffold tests for existing definitions using the `add-test` skill
-6. **Field-test definitions** — exercise tools/resources/prompts with real inputs using the `field-test` skill, get a report of issues and pain points
-7. **Run `devcheck`** — lint, format, typecheck, and security audit
-8. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
-9. **Run the `polish-docs-meta` skill** — finalize README, CHANGELOG, metadata, and agent protocol for shipping
-10. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
-
-Tailor suggestions to what's actually missing or stale — don't recite the full list every time.
+**Config (`src/config/server-config.ts`):** the `DOCGEN_*` env vars — document TTL, byte ceiling, render timeout, inline threshold, and the PDF engine (`lightweight` only in v1; `chromium` is reserved and rejected at startup).
 
 ---
 
