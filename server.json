@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/docgen-mcp-server",
-  "description": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
+  "description": "Render HTML/markdown to PDF, rows to xlsx, and fill AcroForm PDFs — downloadable documents.",
   "repository": {
     "url": "https://github.com/cyanheads/docgen-mcp-server",
     "source": "github"

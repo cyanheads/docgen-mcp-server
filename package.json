@@ -39,7 +39,18 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "pdf",
+    "xlsx",
+    "spreadsheet",
+    "pdf-form",
+    "document-generation"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/cyanheads/docgen-mcp-server.git"

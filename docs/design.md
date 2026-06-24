@@ -160,25 +160,28 @@ output and documents exactly which formats exist.
 ### Stored record (internal, tenant-scoped)
 
 What persists between a `render/export/fill` call and a later `docgen_get_document` / resource read.
-Split into a **lightweight metadata record** (`ctx.state`, serializable KV) and the **bytes**
-(a storage provider key) so the KV layer never holds a multi-MB base64 string:
+Split into a **lightweight metadata record** and the **base64 bytes** under two separate
+`ctx.state` keys, so a read can fetch the small meta record without pulling the multi-MB blob
+along with it:
 
 ```ts
-// ctx.state key: `doc:meta:{documentId}`  (tenant-prefixed automatically)
+// ctx.state key: `doc/meta/{documentId}`  (tenant-prefixed automatically)
 interface StoredDocumentMeta {
   documentId: string;
-  blobKey: string;           // storage-provider key holding the raw bytes
+  blobKey: string;           // `doc/blob/{documentId}` — the ctx.state key holding the base64 bytes
   mimeType: DocumentMime;
   byteSize: number;
   pageCount?: number;
   sheetCount?: number;
   createdAt: string;
+  expiresAtMs: number;       // absolute expiry (epoch ms) — used to compute ttlSecondsRemaining on read
 }
-// bytes: storage-provider object at `blobKey`, written with the same TTL as the meta record
+// bytes: base64 string under `doc/blob/{documentId}`, written with the same TTL as the meta record
 ```
 
-Both the meta record and the blob are written with the same `{ ttl }` so they expire
-together; an expired id surfaces as `document_expired` (see Error Contract).
+Keys use `/` separators, not `:` — `ctx.state` storage keys disallow colons. Both the meta
+record and the blob are written with the same `{ ttl }` so they expire together; an expired id
+surfaces as `document_expired` (see Error Contract).
 
 ### Tool input value types
 
@@ -215,7 +218,7 @@ No external API → the service layer is the bundled rendering stack plus the ar
 | Service | Responsibility | Key methods |
 |---|---|---|
 | `RenderService` | Owns the rendering stack. PDF from HTML/markdown (lightweight engine in v1), `.xlsx` from sheet specs, AcroForm fill + flatten. Enforces the byte ceiling and render timeout; classifies render failures. | `renderPdf(source, pageOptions, ctx)`, `renderSpreadsheet(sheets, ctx)`, `fillForm(sourceBytes, fields, flatten, ctx)` — each returns `{ bytes, mimeType, pageCount?/sheetCount? }` |
-| `DocumentStore` | Persists rendered artifacts and their metadata, mints document ids, enforces TTL, resolves ids back to bytes+metadata. Thin wrapper over `ctx.state` (metadata) + the storage provider (bytes). | `put(bytes, meta, ctx)` → `documentId`; `get(documentId, ctx)` → `StoredDocumentMeta + bytes` or `null`; builds the `DocumentEnvelope` |
+| `DocumentStore` | Persists rendered artifacts and their metadata, mints document ids, enforces TTL, resolves ids back to bytes+metadata. Thin wrapper over `ctx.state` — meta record and base64 blob under separate tenant-scoped keys. | `put(result, ctx)` → `DocumentEnvelope`; `get(documentId, ctx)` → `{ meta, bytes }` or `null`; `buildEnvelope(meta, bytes, ctx)` |
 
 Both follow the framework init/accessor pattern (`getRenderService()` / `getDocumentStore()`,
 initialized in `setup()`). No DataCanvas, no MirrorService, no retry layer — there is no
@@ -225,11 +228,12 @@ queryable table).
 **Markdown path:** markdown → HTML via a small bundled converter, then through the same
 HTML→PDF engine. Keeps one PDF code path; markdown is sugar over the HTML input.
 
-**Why a storage provider for bytes, not `ctx.state` alone:** `ctx.state` is a serializable KV
-designed for lightweight values; a multi-MB document base64-encoded into KV is the wrong
-shape. The storage provider (`STORAGE_PROVIDER_TYPE`) already abstracts in-memory /
-filesystem / R2, so `DocumentStore` writes bytes there and keeps only the small meta record
-in `ctx.state`. Both get the same TTL.
+**Why two `ctx.state` keys, not one record:** the bytes and the meta record live under
+separate keys (`doc/blob/{id}` and `doc/meta/{id}`) so a read that only needs metadata never
+pulls the multi-MB base64 blob with it. `ctx.state` is itself backed by `STORAGE_PROVIDER_TYPE`
+(in-memory default → filesystem / R2 for durability), so swapping to a durable byte store is a
+config change, not a `DocumentStore` rewrite. Both keys get the same TTL so they expire
+atomically.
 
 ---
 
@@ -429,9 +433,10 @@ identical.
 - **One shared `DocumentEnvelope` across all four tools.** Identical delivery shape means the
   three writers and the reader are interchangeable to the agent, and the hosted-URL vs.
   inline-base64 split is one decision in one place rather than per-tool.
-- **Bytes in a storage provider, metadata in `ctx.state`.** Keeps the KV layer holding small
-  records and routes multi-MB blobs through the provider built for them
-  (`STORAGE_PROVIDER_TYPE`). Both written with the same TTL so they expire atomically.
+- **Bytes and metadata under two separate `ctx.state` keys.** The small meta record and the
+  base64 blob are stored independently (`doc/meta/{id}`, `doc/blob/{id}`) so a metadata read
+  never drags the multi-MB blob with it. `ctx.state` is provider-backed (`STORAGE_PROVIDER_TYPE`),
+  so durability is a config swap. Both written with the same TTL so they expire atomically.
 - **`documentId` is opaque and only obtainable from a `render/export/fill` output.** Not derived from
   input, not guessable — stated in the field description so the agent knows the *only* way to
   get one is to render first. This is the explicit cross-tool dependency the read tool +

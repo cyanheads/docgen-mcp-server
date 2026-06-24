@@ -39,10 +39,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="docgen-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="Render HTML/markdown to PDF, rows to xlsx, and fill AcroForm PDFs — downloadable documents."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/docgen-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./
@@ -89,8 +89,9 @@ COPY --from=build /usr/src/app/dist ./dist
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
 RUN mkdir -p /var/log/docgen-mcp-server && chown -R bun:bun /var/log/docgen-mcp-server
 
-# Writable data dirs for on-disk SQLite stores (catalog index / observations
-# mirror), owned by the runtime user. Mount a volume over either in production.
+# Writable data dirs owned by the runtime user, for a durable STORAGE_PROVIDER_TYPE
+# (filesystem) backing rendered-document bytes. Mount a volume here in production;
+# the default in-memory provider needs neither.
 RUN mkdir -p /usr/src/app/.cache /usr/src/app/.mirror \
   && chown -R bun:bun /usr/src/app/.cache /usr/src/app/.mirror
 
