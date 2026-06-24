@@ -193,7 +193,7 @@ export class RenderService {
   private resolveSourceToBlocks(source: PdfSource): BlockDocument {
     if (source.html !== undefined) return htmlToBlocks(source.html);
     if (source.markdown !== undefined) return markdownToBlocks(source.markdown);
-    // template path — already validated to have template+data by the handler.
+    // template path — handler validated template+data present before calling renderPdf.
     const filled = this.renderTemplate(source.template ?? '', source.data ?? {});
     return htmlToBlocks(filled);
   }
@@ -527,7 +527,7 @@ function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): 
     }
   }
   if (current) lines.push(current);
-  return lines.length > 0 ? lines : [''];
+  return lines;
 }
 
 /** Breaks an overlong unbreakable token into width-bounded chunks. */
