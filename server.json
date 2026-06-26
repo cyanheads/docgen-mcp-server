@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/docgen-mcp-server",
-  "description": "Render HTML/markdown to PDF, rows to xlsx, and fill AcroForm PDFs — downloadable documents.",
+  "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs.",
   "repository": {
     "url": "https://github.com/cyanheads/docgen-mcp-server",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "docgen-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "identifier": "@cyanheads/docgen-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",
@@ -75,9 +75,9 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "docgen-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "identifier": "@cyanheads/docgen-mcp-server",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
         {
           "type": "positional",

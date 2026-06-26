@@ -1,7 +1,7 @@
 {
   "docgen-mcp-server": {
     "command": "npx",
-    "args": ["-y", "docgen-mcp-server"],
+    "args": ["-y", "@cyanheads/docgen-mcp-server"],
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
     }
