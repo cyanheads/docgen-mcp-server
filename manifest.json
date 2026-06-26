@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "docgen-mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server that renders agent content into downloadable documents: HTML/markdown/template to PDF, tabular rows to xlsx, and AcroForm PDF fill — delivered as a download URL or inline base64.",
+  "version": "0.1.1",
+  "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "homepage": "https://github.com/cyanheads/docgen-mcp-server",
   "repository": { "type": "git", "url": "https://github.com/cyanheads/docgen-mcp-server" },

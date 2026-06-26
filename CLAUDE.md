@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** docgen-mcp-server
-**Version:** 0.1.0
+**Version:** 0.1.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.9`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -54,36 +54,52 @@ docgen-mcp-server renders structured agent content into downloadable binary docu
 
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getDocumentStore } from '@/services/document/document-store.js';
+import { formatEnvelopeLines } from '@/services/document/format-envelope.js';
+import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getDocumentTool = tool('docgen_get_document', {
+  title: 'docgen-mcp-server', // display identity is the unscoped package name on every surface
+  description:
+    'Re-fetch a previously rendered document by the id a docgen render/export/fill tool returned.',
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    documentId: z
+      .string()
+      .min(1)
+      .describe('The opaque id returned by an earlier docgen render/export/fill call.'),
   }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+  output: z.object({ document: DocumentEnvelopeSchema }),
+  errors: [
+    {
+      reason: 'document_expired',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No stored document for that id — expired past its TTL, or never existed.',
+      recovery:
+        'Re-render with the originating docgen render/export/fill tool; ids are single-render and not reusable.',
+    },
+  ],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const store = getDocumentStore();
+    const resolved = await store.get(input.documentId, ctx);
+    // Handlers throw; ctx.fail is typed against the declared reasons, recoveryFor mirrors the hint into content[].
+    if (!resolved) {
+      throw ctx.fail('document_expired', `No document found for id ${input.documentId}.`, {
+        ...ctx.recoveryFor('document_expired'),
+      });
+    }
+    return { document: store.buildEnvelope(resolved.meta, resolved.bytes, ctx) };
   },
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  // format() is the markdown twin of structuredContent — both surfaces carry the same envelope.
+  format: (result) => {
+    const d = result.document;
+    return [
+      { type: 'text', text: formatEnvelopeLines(`Retrieved ${(d.byteSize / 1024).toFixed(1)} KB.`, d) },
+    ];
+  },
 });
 ```
 
@@ -91,34 +107,38 @@ export const searchItems = tool('search_items', {
 
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getDocumentStore } from '@/services/document/document-store.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
+export const documentResource = resource('docgen://document/{documentId}', {
+  name: 'docgen-document',
+  title: 'docgen-mcp-server',
+  description: 'Fetch a rendered document by id — raw bytes as a blob plus a JSON metadata block.',
+  mimeType: 'application/octet-stream', // per-item mime types are set on the returned content
+  params: z.object({
+    documentId: z
+      .string()
+      .min(1)
+      .describe('The opaque id returned by a docgen render/export/fill tool.'),
   }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
+  errors: [
+    {
+      reason: 'document_expired',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No stored document for that id — expired past its TTL, or never existed.',
+      recovery:
+        'Re-render with the originating docgen render/export/fill tool; ids are single-render and not reusable.',
+    },
   ],
+  async handler(params, ctx) {
+    const resolved = await getDocumentStore().get(params.documentId, ctx);
+    if (!resolved) {
+      throw ctx.fail('document_expired', `No document found for id ${params.documentId}.`, {
+        ...ctx.recoveryFor('document_expired'),
+      });
+    }
+    return resolved;
+  },
 });
 ```
 
@@ -130,23 +150,50 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  documentTtlSeconds: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(900)
+    .describe('How long a rendered document is retrievable before it expires, in seconds.'),
+  maxDocumentBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(26_214_400)
+    .describe('Hard ceiling on a single rendered artifact in bytes; exceeding it aborts the render.'),
+  renderTimeoutMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(30_000)
+    .describe('Per-render wall-clock budget in milliseconds; exceeding it aborts the render.'),
+  inlineMaxBytes: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(5_242_880)
+    .describe('Artifacts at or under this byte size are returned inline as base64; larger ones omit it.'),
+  pdfEngine: z
+    .enum(['lightweight', 'chromium'])
+    .default('lightweight')
+    .describe('Selects the PDF rendering engine. Only `lightweight` is implemented in v1.'),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    documentTtlSeconds: 'DOCGEN_DOCUMENT_TTL_SECONDS',
+    maxDocumentBytes: 'DOCGEN_MAX_DOCUMENT_BYTES',
+    renderTimeoutMs: 'DOCGEN_RENDER_TIMEOUT_MS',
+    inlineMaxBytes: 'DOCGEN_INLINE_MAX_BYTES',
+    pdfEngine: 'DOCGEN_PDF_ENGINE',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`DOCGEN_DOCUMENT_TTL_SECONDS`) not the path (`documentTtlSeconds`). Throws `ConfigurationError`, which the framework prints as a clean startup banner — `chromium` is parsed but rejected here until the high-fidelity engine ships.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
@@ -156,9 +203,9 @@ For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
+  name: 'docgen-mcp-server',
+  title: 'docgen-mcp-server',                 // must match the unscoped package name — enforced by lint:packaging
+  websiteUrl: 'https://github.com/cyanheads/docgen-mcp-server', // canonical homepage URL
   description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
   icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
   instructions: 'Use shortcut alpha for the most common case.', // session-level context
@@ -180,6 +227,7 @@ Handlers receive a unified `ctx` object. Key properties:
 | `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
+| `ctx.recoveryFor(reason)` | Typed lookup of the contract `recovery` for a declared reason. Returns `{ recovery: { hint } }` for known reasons, `{}` otherwise. Spread into `ctx.fail` data to mirror the contract hint into `content[]`. |
 | `ctx.requestId` | Unique request ID. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
@@ -233,20 +281,26 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — wires services, registers the surface
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # DOCGEN_* env vars (Zod schema)
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    document/
+      render-service.ts                 # Bundled render stack (PDF, xlsx, form-fill); byte ceiling + timeout
+      document-store.ts                 # Tenant-scoped, TTL-bounded artifact store; mints ids, builds the envelope
+      fetch-guard.ts                    # SSRF-guarded PDF fetcher for the fill_form url source
+      html-blocks.ts                    # HTML/markdown → linear block model for the lightweight engine
+      format-envelope.ts                # Shared DocumentEnvelope formatter
+      render-types.ts                   # Render-input Zod schemas
+      types.ts                          # Domain types (DocumentEnvelope, StoredDocumentMeta)
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      render-pdf.tool.ts                # docgen_render_pdf
+      export-spreadsheet.tool.ts        # docgen_export_spreadsheet
+      fill-form.tool.ts                 # docgen_fill_form
+      get-document.tool.ts              # docgen_get_document
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      document.resource.ts              # docgen://document/{documentId}
 ```
 
 ---

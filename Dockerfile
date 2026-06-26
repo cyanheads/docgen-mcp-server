@@ -39,7 +39,7 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="docgen-mcp-server"
-LABEL org.opencontainers.image.description="Render HTML/markdown to PDF, rows to xlsx, and fill AcroForm PDFs — downloadable documents."
+LABEL org.opencontainers.image.description="Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/docgen-mcp-server"
