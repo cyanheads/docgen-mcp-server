@@ -92,11 +92,13 @@ describe('RenderService', () => {
       expect(leadingAscii(result.bytes, 5)).toBe(PDF_MAGIC);
     });
 
-    it('throws template_render_failed when a referenced key is missing', async () => {
+    it('throws template_render_failed and names the missing key', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
       await expect(
         svc.renderPdf({ template: '<p>{{missing}}</p>', data: { present: '1' } }, defaultPage, ctx),
-      ).rejects.toMatchObject({ data: { reason: 'template_render_failed' } });
+      ).rejects.toMatchObject({
+        data: { reason: 'template_render_failed', missingKey: 'missing' },
+      });
     });
 
     it('sets degraded when HTML carries unsupported styling', async () => {

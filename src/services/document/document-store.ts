@@ -8,7 +8,6 @@
 
 import { randomBytes } from 'node:crypto';
 import type { Context } from '@cyanheads/mcp-ts-core';
-import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { getServerConfig } from '@/config/server-config.js';
 import type { DocumentEnvelope, RenderResult, StoredDocumentMeta } from './types.js';
 
@@ -18,6 +17,14 @@ const META_PREFIX = 'doc/meta/';
 const BLOB_PREFIX = 'doc/blob/';
 const ID_PREFIX = 'doc_';
 const ID_BYTES = 18; // 18 bytes → 24 base64url chars
+
+/**
+ * Canonical shape of a minted document id: the `doc_` prefix plus exactly 24
+ * url-safe base64url characters (18 random bytes → 24 chars). Must stay in lockstep
+ * with `mintDocumentId`. Exported so the tool/resource input schemas reject a
+ * malformed id at parse time, before it is ever interpolated into a storage key.
+ */
+export const DOCUMENT_ID_PATTERN = /^doc_[A-Za-z0-9_-]{24}$/;
 
 /**
  * Mints an opaque, non-guessable document id of the form `doc_` + 24 url-safe
@@ -36,8 +43,6 @@ export interface ResolvedDocument {
 }
 
 export class DocumentStore {
-  constructor(private readonly config: AppConfig) {}
-
   /**
    * Persists rendered bytes + metadata under a freshly minted id, both written
    * with the configured document TTL so they expire together, and returns the
@@ -85,6 +90,12 @@ export class DocumentStore {
    * present — a half-expired pair reads as gone).
    */
   async get(documentId: string, ctx: Context): Promise<ResolvedDocument | null> {
+    // Defence in depth: a malformed id can never match a minted one, so resolve it
+    // as not-found before it reaches storage. The input schemas already reject these
+    // at parse time; this guard ensures a missed boundary never constructs — or
+    // leaks — an internal storage key.
+    if (!DOCUMENT_ID_PATTERN.test(documentId)) return null;
+
     const meta = await ctx.state.get<StoredDocumentMeta>(`${META_PREFIX}${documentId}`);
     if (!meta) return null;
 
@@ -95,9 +106,10 @@ export class DocumentStore {
   }
 
   /**
-   * Builds the `DocumentEnvelope` from a stored meta record and the bytes.
-   * Inlines the base64 only when the artifact is at or under the inline ceiling;
-   * derives a `downloadUrl` only when a public origin is configured (hosted mode).
+   * Builds the `DocumentEnvelope` from a stored meta record and the bytes. Inlines
+   * the base64 only when the artifact is at or under the inline ceiling. Bytes are
+   * delivered via the `resourceUri` (and inline base64 when small); `downloadUrl`
+   * is reserved for a future HTTP download route and is not emitted in v1.
    */
   buildEnvelope(meta: StoredDocumentMeta, bytes: Uint8Array, ctx: Context): DocumentEnvelope {
     const { inlineMaxBytes } = getServerConfig();
@@ -115,9 +127,6 @@ export class DocumentStore {
       createdAt: meta.createdAt,
     };
 
-    const downloadUrl = this.buildDownloadUrl(meta.documentId);
-    if (downloadUrl) envelope.downloadUrl = downloadUrl;
-
     if (meta.byteSize <= inlineMaxBytes) {
       envelope.inlineBase64 = Buffer.from(bytes).toString('base64');
     }
@@ -125,22 +134,9 @@ export class DocumentStore {
     ctx.log.debug('Built document envelope', {
       documentId: meta.documentId,
       inlined: envelope.inlineBase64 !== undefined,
-      hasDownloadUrl: downloadUrl !== undefined,
     });
 
     return envelope;
-  }
-
-  /**
-   * Derives the absolute download URL from the configured public origin. Returns
-   * `undefined` in stdio mode (no public origin), where delivery is inline/resource
-   * only.
-   */
-  private buildDownloadUrl(documentId: string): string | undefined {
-    const publicUrl = this.config.mcpPublicUrl;
-    if (!publicUrl) return;
-    const origin = publicUrl.replace(/\/+$/, '');
-    return `${origin}/documents/${documentId}`;
   }
 }
 
@@ -148,8 +144,8 @@ export class DocumentStore {
 
 let _store: DocumentStore | undefined;
 
-export function initDocumentStore(config: AppConfig): void {
-  _store = new DocumentStore(config);
+export function initDocumentStore(): void {
+  _store = new DocumentStore();
 }
 
 export function getDocumentStore(): DocumentStore {

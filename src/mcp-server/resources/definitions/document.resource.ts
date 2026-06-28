@@ -9,7 +9,7 @@
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getDocumentStore } from '@/services/document/document-store.js';
+import { DOCUMENT_ID_PATTERN, getDocumentStore } from '@/services/document/document-store.js';
 import type { StoredDocumentMeta } from '@/services/document/types.js';
 
 /** Internal handler return — carries the bytes and meta to the formatter. */
@@ -29,7 +29,10 @@ export const documentResource = resource('docgen://document/{documentId}', {
   params: z.object({
     documentId: z
       .string()
-      .min(1)
+      .regex(
+        DOCUMENT_ID_PATTERN,
+        'documentId must be an id returned by a docgen render/export/fill tool — `doc_` followed by 24 url-safe characters.',
+      )
       .describe('The opaque document id returned by a docgen render/export/fill tool.'),
   }),
   errors: [

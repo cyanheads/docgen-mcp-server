@@ -5,8 +5,6 @@
  * @module tests/services/document-store
  */
 
-import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
-import { config } from '@cyanheads/mcp-ts-core/config';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
@@ -23,7 +21,7 @@ describe('DocumentStore', () => {
   beforeEach(() => {
     resetServerConfig();
     vi.unstubAllEnvs();
-    store = new DocumentStore(config);
+    store = new DocumentStore();
   });
 
   afterEach(() => {
@@ -49,9 +47,19 @@ describe('DocumentStore', () => {
     expect(resolved!.meta.documentId).toBe(envelope.documentId);
   });
 
-  it('returns null for an unknown id', async () => {
+  it('returns null for an unknown but well-formed id', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
-    expect(await store.get('doc_doesnotexist000000000', ctx)).toBeNull();
+    expect(await store.get('doc_doesNotExistInStore00001', ctx)).toBeNull();
+  });
+
+  it('resolves a structurally invalid id as not-found before any storage read', async () => {
+    const ctx = createMockContext({ tenantId: 't1' });
+    const getSpy = vi.spyOn(ctx.state, 'get');
+    // Defence in depth: a malformed id can never match a minted one, so it must read
+    // as gone WITHOUT a storage lookup — the live StorageService never sees a key
+    // built from caller input. (Describes the class, not an exploit.)
+    expect(await store.get('not-a-minted-id', ctx)).toBeNull();
+    expect(getSpy).not.toHaveBeenCalled();
   });
 
   it('writes only storage-key-safe keys (no colons — the real StorageService rejects them)', async () => {
@@ -93,31 +101,12 @@ describe('DocumentStore', () => {
     expect(envelope.inlineBase64).toBeUndefined();
   });
 
-  it('omits downloadUrl in stdio mode (no public origin)', async () => {
+  it('never emits downloadUrl — reserved for a future HTTP route, not served in v1', async () => {
+    // Regression: the envelope must not advertise a downloadUrl, because no HTTP route
+    // serves it (a GET would 404). Bytes are delivered via resourceUri / inlineBase64.
     const ctx = createMockContext({ tenantId: 't1' });
-    const noUrl = await store.put(pdfResult(), ctx);
-    expect(noUrl.downloadUrl).toBeUndefined();
-  });
-
-  it('derives a downloadUrl when a public origin is configured', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
-    // Construct the store with an explicit config carrying a public origin
-    // (the global config proxy memoizes on first read, so stubbing env mid-run
-    // is unreliable — pass the value directly).
-    const hostedStore = new DocumentStore({
-      mcpPublicUrl: 'https://docgen.example.com/',
-    } as AppConfig);
-    const hosted = await hostedStore.put(pdfResult(), ctx);
-    expect(hosted.downloadUrl).toBe(`https://docgen.example.com/documents/${hosted.documentId}`);
-  });
-
-  it('strips trailing slashes from the public origin when building the URL', async () => {
-    const ctx = createMockContext({ tenantId: 't1' });
-    const hostedStore = new DocumentStore({
-      mcpPublicUrl: 'https://docgen.example.com///',
-    } as AppConfig);
-    const hosted = await hostedStore.put(pdfResult(), ctx);
-    expect(hosted.downloadUrl).toBe(`https://docgen.example.com/documents/${hosted.documentId}`);
+    const envelope = await store.put(pdfResult(), ctx);
+    expect(envelope.downloadUrl).toBeUndefined();
   });
 
   it('inlines an artifact exactly at the inline ceiling (boundary is inclusive)', async () => {

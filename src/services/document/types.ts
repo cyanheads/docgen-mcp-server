@@ -28,10 +28,11 @@ export type DocumentMime = z.infer<typeof DocumentMimeSchema>;
  * `docgen_get_document`. Bytes ride as a stable resource URI and/or inline base64;
  * metadata is always present on both client surfaces.
  *
- * Required-field discipline: `pageCount`, `sheetCount`, `downloadUrl`, and
- * `inlineBase64` are `.optional()` because they are populated only on some code
- * paths (PDF vs xlsx, hosted vs stdio, small vs large). Every other field is
- * populated on every return path.
+ * Required-field discipline: `pageCount`, `sheetCount`, and `inlineBase64` are
+ * `.optional()` because they are populated only on some code paths (PDF vs xlsx,
+ * small vs large). `downloadUrl` is optional and reserved for a future HTTP
+ * download route — not emitted in v1. Every other field is populated on every
+ * return path.
  */
 export const DocumentEnvelopeSchema = z
   .object({
@@ -47,7 +48,7 @@ export const DocumentEnvelopeSchema = z
       .string()
       .optional()
       .describe(
-        'Absolute https URL to the bytes; present only in HTTP/hosted mode (derived from the public origin). Omitted in stdio.',
+        'Reserved for a future HTTP download route; not emitted in v1 (the field is always absent). Fetch the bytes via resourceUri or inlineBase64 instead.',
       ),
     mimeType: DocumentMimeSchema,
     byteSize: z.number().int().nonnegative().describe('Size of the rendered artifact in bytes.'),
@@ -73,7 +74,7 @@ export const DocumentEnvelopeSchema = z
       .string()
       .optional()
       .describe(
-        'The document bytes, base64-encoded. Present when the artifact is at or under the inline threshold; omitted (field absent) when larger — fetch via the resource or download URL instead.',
+        'The document bytes, base64-encoded. Present when the artifact is at or under the inline threshold; omitted (field absent) when larger — fetch via the resource URI instead.',
       ),
   })
   .describe(

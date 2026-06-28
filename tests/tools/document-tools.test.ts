@@ -7,7 +7,6 @@
  * @module tests/tools/document-tools
  */
 
-import { config } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import ExcelJS from 'exceljs';
@@ -33,7 +32,7 @@ beforeEach(() => {
   resetServerConfig();
   vi.unstubAllEnvs();
   initRenderService();
-  initDocumentStore(config);
+  initDocumentStore();
 });
 
 afterEach(() => {
@@ -101,13 +100,21 @@ describe('docgen_render_pdf', () => {
     expect(result.document.inlineBase64).toBeDefined();
   });
 
-  it('propagates template_render_failed when a template key is missing', async () => {
+  it('propagates template_render_failed with the contract recovery hint and missing key', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
     const input = renderPdfTool.input.parse({
       source: { template: '<p>{{missing}}</p>', data: { present: '1' } },
     });
+    // Regression: the throw now threads ctx so the declared recovery hint reaches the
+    // wire (data.recovery.hint), alongside the still-useful missingKey.
     await expect(renderPdfTool.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'template_render_failed' },
+      data: {
+        reason: 'template_render_failed',
+        missingKey: 'missing',
+        recovery: {
+          hint: "Check the template's {{referenced}} fields against the keys present in the data object.",
+        },
+      },
     });
   });
 
@@ -320,7 +327,7 @@ describe('docgen_get_document + resource', () => {
     const ctx = createMockContext({ tenantId: 't1', errors: getDocumentTool.errors });
     await expect(
       getDocumentTool.handler(
-        getDocumentTool.input.parse({ documentId: 'doc_unknown000000000000aa' }),
+        getDocumentTool.input.parse({ documentId: 'doc_unknownIdNotInTheStore01' }),
         ctx,
       ),
     ).rejects.toMatchObject({
@@ -331,9 +338,9 @@ describe('docgen_get_document + resource', () => {
 
   it('the resource throws document_expired for an unknown id', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: documentResource.errors });
-    const uri = new URL('docgen://document/doc_missing0000000000000a');
+    const uri = new URL('docgen://document/doc_missingIdNotInTheStore01');
     await expect(
-      documentResource.handler({ documentId: 'doc_missing0000000000000a' }, { ...ctx, uri }),
+      documentResource.handler({ documentId: 'doc_missingIdNotInTheStore01' }, { ...ctx, uri }),
     ).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'document_expired' },
@@ -380,6 +387,45 @@ describe('docgen_get_document + resource', () => {
     );
     expect(meta).toBeDefined();
     expect(JSON.parse(meta!.text).documentId).toBe(id);
+  });
+
+  it('rejects a malformed documentId at the schema boundary', () => {
+    // The input regex rejects a non-conforming id before the handler runs, so no
+    // internal storage key is ever built from caller input. Benign wrong-shape ids
+    // stand in for the class — no exploit string embedded.
+    for (const bad of ['short', 'not-a-minted-id', 'doc_tooFewChars']) {
+      let caught: unknown;
+      try {
+        getDocumentTool.input.parse({ documentId: bad });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught, `"${bad}" must be rejected`).toBeInstanceOf(Error);
+      expect((caught as Error).message).not.toContain('doc/meta');
+    }
+  });
+
+  it('get_document resolves a malformed id to the public document_expired contract', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: getDocumentTool.errors });
+    // Defence in depth past the schema: a malformed id reaching the handler resolves
+    // via the store guard to document_expired — never a storage-key validation error.
+    await expect(
+      getDocumentTool.handler({ documentId: 'not-a-minted-id' }, ctx),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'document_expired' },
+    });
+  });
+
+  it('the resource resolves a malformed id to the public document_expired contract', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: documentResource.errors });
+    const uri = new URL('docgen://document/malformed');
+    await expect(
+      documentResource.handler({ documentId: 'not-a-minted-id' }, { ...ctx, uri }),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'document_expired' },
+    });
   });
 });
 
@@ -429,12 +475,12 @@ describe('tool format()', () => {
     expect(text).toContain('omitted');
   });
 
-  it('export_spreadsheet format notes the stdio download absence when no URL', () => {
+  it('export_spreadsheet format notes the download URL is not emitted when absent', () => {
     const blocks = exportSpreadsheetTool.format!({
       document: { ...xlsxEnvelope, downloadUrl: undefined },
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('hosted mode only');
+    expect(text).toContain('not emitted');
   });
 
   it('fill_form format lists unmatched fields when present', () => {

@@ -20,7 +20,7 @@ export function formatEnvelopeLines(lead: string, d: DocumentEnvelope): string {
     lead,
     `**Document ID:** ${d.documentId}`,
     `**Resource:** ${d.resourceUri}`,
-    `**Download URL:** ${d.downloadUrl ?? '(hosted mode only — not available over stdio)'}`,
+    `**Download URL:** ${d.downloadUrl ?? '(not emitted — fetch the bytes via the resource URI or inline base64)'}`,
     `**Mime type:** ${d.mimeType}`,
     `**Size:** ${d.byteSize} bytes`,
     `**Page count:** ${d.pageCount ?? '(not a paged document)'}`,
@@ -29,7 +29,7 @@ export function formatEnvelopeLines(lead: string, d: DocumentEnvelope): string {
     `**Created:** ${d.createdAt}`,
     d.inlineBase64 !== undefined
       ? `**Inline document (base64):** ${d.inlineBase64}`
-      : '**Inline document (base64):** (omitted — over the inline size limit; fetch via the resource URI or download URL)',
+      : '**Inline document (base64):** (omitted — over the inline size limit; fetch via the resource URI)',
   ];
   return lines.join('\n');
 }

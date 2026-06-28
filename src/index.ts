@@ -24,11 +24,11 @@ await createApp({
   tools: [renderPdfTool, exportSpreadsheetTool, fillFormTool, getDocumentTool],
   resources: [documentResource],
   instructions:
-    'Render structured content into downloadable documents: docgen_render_pdf (HTML/markdown/template → PDF), docgen_export_spreadsheet (named row sheets → xlsx), docgen_fill_form (fill an AcroForm PDF). Each returns a documentId; re-fetch within the TTL via docgen_get_document or the docgen://document/{id} resource. Hosted deployments return a download URL; stdio returns inline base64 for small documents.',
-  setup(core) {
+    'Render structured content into downloadable documents: docgen_render_pdf (HTML/markdown/template → PDF), docgen_export_spreadsheet (named row sheets → xlsx), docgen_fill_form (fill an AcroForm PDF). Each returns a documentId; re-fetch within the TTL via docgen_get_document or the docgen://document/{id} resource. Small documents are returned inline as base64; otherwise fetch the bytes via the resource.',
+  setup() {
     // Fail fast on malformed DOCGEN_* config (or an unimplemented engine) at startup.
     getServerConfig();
     initRenderService();
-    initDocumentStore(core.config);
+    initDocumentStore();
   },
 });

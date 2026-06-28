@@ -57,7 +57,7 @@ export class RenderService {
   renderPdf(source: PdfSource, pageOptions: PageOptions, ctx: Context): Promise<PdfRenderOutput> {
     const { renderTimeoutMs } = getServerConfig();
     return this.withTimeout(renderTimeoutMs, ctx, async () => {
-      const doc = this.resolveSourceToBlocks(source);
+      const doc = this.resolveSourceToBlocks(source, ctx);
       const out = await this.layoutPdf(doc, pageOptions, ctx);
       this.assertWithinByteCeiling(out.bytes.byteLength, ctx);
       ctx.log.info('Rendered PDF', {
@@ -190,20 +190,22 @@ export class RenderService {
   // --- internals ---
 
   /** Resolves the source union to a block document, applying the template engine. */
-  private resolveSourceToBlocks(source: PdfSource): BlockDocument {
+  private resolveSourceToBlocks(source: PdfSource, ctx: Context): BlockDocument {
     if (source.html !== undefined) return htmlToBlocks(source.html);
     if (source.markdown !== undefined) return markdownToBlocks(source.markdown);
     // template path — handler validated template+data present before calling renderPdf.
-    const filled = this.renderTemplate(source.template ?? '', source.data ?? {});
+    const filled = this.renderTemplate(source.template ?? '', source.data ?? {}, ctx);
     return htmlToBlocks(filled);
   }
 
   /**
    * Fills a `{{key}}` / `{{a.b}}` template from a data object. A referenced key
    * absent from `data` throws `template_render_failed` — the agent's signal to
-   * reconcile the template against its data.
+   * reconcile the template against its data. `ctx` is threaded through so the throw
+   * carries the declared recovery hint (`ctx.recoveryFor`) onto the wire, matching
+   * the other typed failures in this service.
    */
-  private renderTemplate(template: string, data: Record<string, unknown>): string {
+  private renderTemplate(template: string, data: Record<string, unknown>, ctx: Context): string {
     return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, path: string) => {
       let value: unknown = data;
       for (const key of path.split('.')) {
@@ -220,6 +222,7 @@ export class RenderService {
           {
             reason: 'template_render_failed',
             missingKey: path,
+            ...ctx.recoveryFor('template_render_failed'),
           },
         );
       }

@@ -9,19 +9,22 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getDocumentStore } from '@/services/document/document-store.js';
+import { DOCUMENT_ID_PATTERN, getDocumentStore } from '@/services/document/document-store.js';
 import { formatEnvelopeLines } from '@/services/document/format-envelope.js';
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 export const getDocumentTool = tool('docgen_get_document', {
   title: 'docgen-mcp-server',
   description:
-    'Re-fetch a previously rendered document by the id a docgen render/export/fill tool returned. Returns the same delivery envelope (metadata plus resource URI, and inline base64 when small enough). Use it to recover a document whose inline copy was dropped, or whose download URL expired but is still within its TTL. The documentId is obtainable ONLY from an earlier docgen_render_pdf, docgen_export_spreadsheet, or docgen_fill_form result — it is not guessable, and an expired or unknown id returns document_expired.',
+    'Re-fetch a previously rendered document by the id a docgen render/export/fill tool returned. Returns the same delivery envelope (metadata plus resource URI, and inline base64 when small enough). Use it to recover a document whose inline copy was dropped (over the inline size limit) while it is still within its TTL. The documentId is obtainable ONLY from an earlier docgen_render_pdf, docgen_export_spreadsheet, or docgen_fill_form result — it is not guessable, and an expired or unknown id returns document_expired.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({
     documentId: z
       .string()
-      .min(1)
+      .regex(
+        DOCUMENT_ID_PATTERN,
+        'documentId must be an id returned by a docgen render/export/fill tool — `doc_` followed by 24 url-safe characters.',
+      )
       .describe(
         'The opaque document id returned by an earlier docgen_render_pdf, docgen_export_spreadsheet, or docgen_fill_form call. Format `doc_` followed by 24 url-safe characters.',
       ),
