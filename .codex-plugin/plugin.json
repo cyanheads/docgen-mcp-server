@@ -1,6 +1,6 @@
 {
   "name": "docgen-mcp-server",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "docgen-mcp-server",
     "shortDescription": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "docgen-mcp-server is the renderer that closes the gap between what an agent can write and the binary file a human downloads. It exposes docgen_render_pdf (HTML, markdown, or a {{key}} template + data → PDF), docgen_export_spreadsheet (named row sheets → xlsx with a column spec), docgen_fill_form (fill and optionally flatten an AcroForm PDF supplied as base64 or an SSRF-guarded https URL), and docgen_get_document (re-fetch a rendered document by id). Outputs are stored tenant-scoped with a short TTL and delivered as a download URL (hosted) or inline base64 (stdio), with a docgen://document/{id} resource as the stable-URI twin.",
+    "longDescription": "docgen-mcp-server is the renderer that closes the gap between what an agent can write and the binary file a human downloads. It exposes docgen_render_pdf (HTML, markdown, or a {{key}} template + data → PDF), docgen_export_spreadsheet (named row sheets → xlsx with a column spec), docgen_fill_form (fill and optionally flatten an AcroForm PDF supplied as base64 or an SSRF-guarded https URL), and docgen_get_document (re-fetch a rendered document by id). Outputs are stored tenant-scoped with a short TTL and delivered through a docgen://document/{id} resource URI plus inline base64 when small enough.",
     "developerName": "cyanheads",
     "category": "productivity",
     "capabilities": ["Read", "Write"],

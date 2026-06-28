@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Why docgen
 
-An agent can write a perfect invoice's HTML, a clean data table, or a filled-form field map as tokens — but it cannot emit bytes. docgen is the renderer that closes the gap: structured content in, a downloadable binary document out. It wraps no external API; the "service" is a bundled rendering stack (`pdf-lib` for PDF and form fill, `exceljs` for spreadsheets, `marked` for the markdown path). Every output is stored tenant-scoped with a short TTL and handed back as a download URL (hosted) or inline base64 (stdio).
+An agent can write a perfect invoice's HTML, a clean data table, or a filled-form field map as tokens — but it cannot emit bytes. docgen is the renderer that closes the gap: structured content in, a downloadable binary document out. It wraps no external API; the "service" is a bundled rendering stack (`pdf-lib` for PDF and form fill, `exceljs` for spreadsheets, `marked` for the markdown path). Every output is stored tenant-scoped with a short TTL and handed back as a stable resource URI plus inline base64 when small enough.
 
 ## Tools
 
@@ -76,7 +76,7 @@ Fill the AcroForm fields of a supplied PDF and optionally flatten it.
 Re-fetch a stored document by id.
 
 - The `documentId` is obtainable **only** from an earlier `docgen_render_pdf`, `docgen_export_spreadsheet`, or `docgen_fill_form` result — it is not guessable or constructible
-- Use it to recover a document whose inline copy was dropped, or whose download URL expired but is still within its TTL
+- Use it to recover a document whose inline copy was dropped (over the inline size limit) while it is still within its TTL
 - An expired or unknown id returns `document_expired`; ids are single-render and not reusable
 
 ## Resources
@@ -101,15 +101,15 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 docgen-specific:
 
 - No external API — a bundled rendering stack (`pdf-lib`, `exceljs`, `marked`), so renders are local and deterministic with no upstream to fail
-- One shared `DocumentEnvelope` across all four tools — the three writers and the reader are interchangeable to the agent, and the hosted-URL vs. inline-base64 split is decided in one place
+- One shared `DocumentEnvelope` across all four tools — the three writers and the reader are interchangeable to the agent, and the resource-URI vs. inline-base64 delivery is decided in one place
 - Bounded renders — a per-document byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a wall-clock timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed, recoverable error instead of a hang
 - Tenant-scoped, TTL-bounded storage — a document id minted for one tenant resolves only for that tenant; outputs are downloads, not records, so they expire rather than accumulate
 - SSRF-guarded form fetch — `docgen_fill_form` with a URL source resolves DNS and checks the destination IP before fetching, blocking private/loopback/link-local ranges
 
 Agent-friendly output:
 
-- Dual-surface delivery — every envelope field lands in both `structuredContent` and the `format()` markdown twin, so tool-only and resource-only clients both see the `documentId`, resource URI, download/inline status, size, and TTL
-- Inline-vs-link by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`, so a large workbook isn't base64-inlined into a tool result; above the threshold, delivery is via the resource or download URL
+- Dual-surface delivery — every envelope field lands in both `structuredContent` and the `format()` markdown twin, so tool-only and resource-only clients both see the `documentId`, resource URI, inline-availability status, size, and TTL
+- Inline-vs-resource by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`, so a large workbook isn't base64-inlined into a tool result; above the threshold, delivery is via the resource URI
 - Partial-fill reporting — `docgen_fill_form` returns `unmatchedFields[]` so the agent learns which field names didn't land and can correct and re-render rather than assuming a clean fill
 - Typed error contract with recovery hints — each tool declares its failure surface (`invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`, `not_a_form`, `source_unfetchable`, `document_expired`, …) with actionable next-step text
 
@@ -176,7 +176,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 # Server listens at http://localhost:3010/mcp
 ```
 
-In HTTP/hosted mode, set `MCP_PUBLIC_URL` to the public origin so each envelope carries an absolute `downloadUrl`; over stdio it is omitted and delivery is inline/resource only.
+Documents are delivered by the `docgen://document/{id}` resource (and inline base64 when small enough) over every transport. The envelope's `downloadUrl` field is reserved for a future HTTP download route and is not emitted in this version.
 
 ### Prerequisites
 
@@ -223,7 +223,7 @@ All configuration is optional — docgen runs with no required environment varia
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_PUBLIC_URL` | Public origin behind a TLS proxy; source of the absolute `downloadUrl` (HTTP mode). | — |
+| `MCP_PUBLIC_URL` | Public origin behind a TLS proxy. (The `downloadUrl` envelope field is reserved for a future HTTP download route and is not emitted in this version.) | — |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend for document bytes + metadata. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
