@@ -106,7 +106,11 @@ export type ColumnSpec = z.infer<typeof ColumnSpecSchema>;
 /** A single named worksheet of row objects. */
 export const SheetSchema = z
   .object({
-    name: z.string().describe('Worksheet name (the tab label).'),
+    name: z
+      .string()
+      .describe(
+        'Worksheet name (the tab label). Excel constraints: 1–31 characters, unique across the workbook (case-insensitive), no * ? : \\ / [ ] characters, and no leading or trailing apostrophe.',
+      ),
     rows: z
       .array(z.record(z.string(), CellValueSchema))
       .describe('Row objects (property → scalar). An empty array produces a header-only sheet.'),
@@ -131,7 +135,7 @@ export const SourcePdfSchema = z
       .string()
       .optional()
       .describe(
-        'The source PDF as a base64 string (no data-URI prefix). Avoids any network fetch.',
+        'The source PDF as a base64 string; line breaks/whitespace and an optional `data:application/pdf;base64,` prefix are tolerated. Avoids any network fetch.',
       ),
     url: z
       .string()

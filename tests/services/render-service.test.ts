@@ -195,6 +195,61 @@ describe('RenderService', () => {
     });
   });
 
+  describe('worksheet name validation', () => {
+    it('throws invalid_sheet_name for a forbidden character', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      await expect(
+        svc.renderSpreadsheet([{ name: 'Bad/Name', rows: [{ a: 1 }] }], ctx),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sheet_name' } });
+    });
+
+    it('throws invalid_sheet_name for a duplicate name (case-insensitive)', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      await expect(
+        svc.renderSpreadsheet(
+          [
+            { name: 'Dup', rows: [{ a: 1 }] },
+            { name: 'dup', rows: [{ b: 2 }] },
+          ],
+          ctx,
+        ),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sheet_name' } });
+    });
+
+    it('throws invalid_sheet_name for a blank name', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      await expect(
+        svc.renderSpreadsheet([{ name: '   ', rows: [{ a: 1 }] }], ctx),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sheet_name' } });
+    });
+
+    it('throws invalid_sheet_name for a name over 31 characters', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      await expect(
+        svc.renderSpreadsheet([{ name: 'x'.repeat(32), rows: [{ a: 1 }] }], ctx),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sheet_name' } });
+    });
+
+    it('throws invalid_sheet_name for a leading or trailing apostrophe', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      await expect(
+        svc.renderSpreadsheet([{ name: "'Quoted'", rows: [{ a: 1 }] }], ctx),
+      ).rejects.toMatchObject({ data: { reason: 'invalid_sheet_name' } });
+    });
+
+    it('accepts a 31-character name and distinct case-varying names', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const result = await svc.renderSpreadsheet(
+        [
+          { name: 'x'.repeat(31), rows: [{ a: 1 }] },
+          { name: 'Summary', rows: [{ b: 2 }] },
+        ],
+        ctx,
+      );
+      expect(result.sheetCount).toBe(2);
+    });
+  });
+
   describe('fillForm', () => {
     it('fills AcroForm fields and returns a valid PDF', async () => {
       const ctx = createMockContext({ tenantId: 't1' });

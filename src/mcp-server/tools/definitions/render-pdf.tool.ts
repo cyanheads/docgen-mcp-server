@@ -40,9 +40,9 @@ export const renderPdfTool = tool('docgen_render_pdf', {
     {
       reason: 'invalid_source',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'None of html / markdown / template+data was provided, or more than one source form was.',
+      when: 'None of html / markdown / template+data was provided, more than one source form was, a template was given without data, or data was given without a template.',
       recovery:
-        'Provide exactly one source: { html }, { markdown }, or { template, data } — not zero and not several.',
+        'Provide exactly one source: { html }, { markdown }, or { template, data } — not zero and not several. data pairs only with template.',
     },
     {
       reason: 'template_render_failed',
@@ -85,6 +85,13 @@ export const renderPdfTool = tool('docgen_render_pdf', {
       throw ctx.fail('invalid_source', 'The template source requires a data object.', {
         ...ctx.recoveryFor('invalid_source'),
       });
+    }
+    if (source.data !== undefined && source.template === undefined) {
+      throw ctx.fail(
+        'invalid_source',
+        'The data object is only used with a template source; html and markdown ignore it. Provide { template, data }, or remove data.',
+        { ...ctx.recoveryFor('invalid_source') },
+      );
     }
 
     const pageOptions = PageOptionsSchema.parse(input.pageOptions ?? {});

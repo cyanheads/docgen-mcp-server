@@ -91,8 +91,9 @@ of the fleet.
   (header label, type, width, number/date format).
 - Fill the AcroForm fields of a supplied PDF (base64 or URL) from a field→value map, and
   optionally flatten.
-- Deliver every output two ways from one envelope: a **resource URI / download URL** (hosted
-  path) and **inline base64** (local/stdio path), carrying identical metadata.
+- Deliver every output two ways from one envelope: a **resource URI** (stable read path) and
+  **inline base64** (local/stdio path), carrying identical metadata. (A hosted `downloadUrl` is
+  reserved for a future HTTP download route — not emitted in v1.)
 - Re-fetch a stored document by id until its TTL expires.
 
 **Non-functional**
@@ -138,8 +139,8 @@ interface DocumentEnvelope {
                              //   Format: `doc_` + 24 url-safe chars. Obtain it ONLY from a
                              //   render/export/fill tool's output — it is not guessable or constructible.
   resourceUri: string;       // `docgen://document/{documentId}` — the stable read URI.
-  downloadUrl?: string;      // absolute https URL to the bytes; present only in HTTP/hosted
-                             //   mode (derived from MCP_PUBLIC_URL). Omitted in stdio.
+  downloadUrl?: string;      // reserved for a future HTTP download route — not emitted in v1
+                             //   (the field is always absent). Fetch via resourceUri / inlineBase64.
   mimeType: DocumentMime;    // 'application/pdf'
                              //   | 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   byteSize: number;          // size of the rendered artifact in bytes — z.number().int().nonnegative()
@@ -189,7 +190,7 @@ surfaces as `document_expired` (see Error Contract).
   - `{ html: string }` — raw HTML string; the agent composes the full document markup.
   - `{ markdown: string }` — markdown string; server converts to HTML then renders.
   - `{ template: string, data: Record<string, unknown> }` — a Handlebars template string filled with `data`. `data` is `z.record(z.string(), z.unknown())`. Missing template keys are a `template_render_failed` error; extra keys in `data` are silently ignored.
-  Providing zero keys or multiple keys → `invalid_source`.
+  Providing zero keys, multiple keys, or `data` without a `template` → `invalid_source`.
 
 - **`pageOptions`** (render_pdf): `size` (`'A4' | 'Letter' | 'Legal' | 'A3' | 'A5'` enum,
   default `'Letter'`), `orientation` (`'portrait' | 'landscape'`, default `'portrait'`),
@@ -256,8 +257,9 @@ Framework env vars worth calling out (already provided, no code needed):
 - **`STORAGE_PROVIDER_TYPE`** — `in-memory` (default; ephemeral, fine for stdio and
   single-instance hosting) → swap to `filesystem` or `cloudflare-r2` for durable bytes across
   restarts. `DocumentStore` is provider-agnostic.
-- **`MCP_PUBLIC_URL`** — the public origin behind the TLS proxy; `downloadUrl` is derived from
-  it. Unset (stdio) → `downloadUrl` is omitted and delivery is inline/resource only.
+- **`MCP_PUBLIC_URL`** — the public origin behind the TLS proxy. Reserved for the future HTTP
+  download route that will populate `downloadUrl`; in v1 the field is never emitted and delivery
+  is always via the resource URI and inline base64.
 
 All booleans (none needed yet) would use `z.stringbool()`, never `z.coerce.boolean()`.
 Numeric env vars use `z.coerce.number()`.
@@ -305,8 +307,8 @@ internally runs: validate input → `RenderService.render*` (bounded by timeout 
 |---|---|---|
 | 1 | Agent | Composes styled HTML for the report. |
 | 2 | Agent → `docgen_render_pdf` | `source: { html }`, `pageOptions: { size: 'Letter', pageNumbers: true }`. |
-| 3 | Server | Renders, stores (TTL), returns `DocumentEnvelope` with `documentId`, `resourceUri`, `downloadUrl` (hosted) or `inlineBase64` (stdio). |
-| 4 | Human | Clicks `downloadUrl`, or the client opens the inline file. |
+| 3 | Server | Renders, stores (TTL), returns `DocumentEnvelope` with `documentId`, `resourceUri`, and `inlineBase64` (when under the inline ceiling). |
+| 4 | Human | Opens the inline file, or the client resolves `resourceUri` to fetch the bytes. |
 
 **2. Cross-server: fetch data → spreadsheet.** This is the strongest demand path. The
 **dependency hop is explicit:** the rows come from *another server's* tool output, not from
@@ -356,9 +358,10 @@ the form-fetch branch); declare it inline per tool via `errors: [...]` and throw
 |---|---|---|---|---|
 | all `render/export/fill` | `document_too_large` | `InvalidParams` | Rendered artifact exceeded `DOCGEN_MAX_DOCUMENT_BYTES`. | Reduce content (fewer rows/pages, smaller images) and retry. |
 | all `render/export/fill` | `render_timeout` | `Timeout` | Render exceeded `DOCGEN_RENDER_TIMEOUT_MS`. | Simplify the document or split it into smaller renders. |
-| `docgen_render_pdf` | `invalid_source` | `InvalidParams` | None of `html` / `markdown` / `template`+`data` was provided, or more than one was. | Provide exactly one source form. |
+| `docgen_render_pdf` | `invalid_source` | `InvalidParams` | None of `html` / `markdown` / `template`+`data` was provided, more than one was, or `data` was supplied without a `template`. | Provide exactly one source form; `data` pairs only with `template`. |
 | `docgen_render_pdf` | `template_render_failed` | `InvalidParams` | The template referenced data keys absent from `data`, or the template was malformed. | Check the template's referenced fields against the `data` object. |
 | `docgen_export_spreadsheet` | `empty_workbook` | `InvalidParams` | `sheets[]` was empty (no sheets at all). | Provide at least one sheet. |
+| `docgen_export_spreadsheet` | `invalid_sheet_name` | `InvalidParams` | A worksheet name is blank, over 31 characters, contains `* ? : \ / [ ]`, begins or ends with an apostrophe, or duplicates another (case-insensitive). | Rename to a unique 1–31 character label without the forbidden characters. |
 | `docgen_fill_form` | `not_a_form` | `InvalidParams` | The source PDF has no AcroForm fields to fill. | Confirm the PDF is a fillable form; a flat PDF cannot be filled. |
 | `docgen_fill_form` | `source_unfetchable` | `ServiceUnavailable` | `sourcePdf.url` did not return a fetchable PDF (non-2xx, not a PDF, response over `DOCGEN_MAX_DOCUMENT_BYTES`, or blocked by SSRF guard — see below). | Verify the URL is public, reachable, and serves `application/pdf`; or pass the PDF as base64 to skip the fetch entirely. |
 | `docgen_fill_form` | `invalid_pdf_source` | `InvalidParams` | `sourcePdf.base64` was provided but is not a valid base64-encoded PDF. | Re-encode the PDF as base64 and verify the content starts with `JVBERi` (the base64 prefix for `%PDF-`). |
@@ -387,9 +390,10 @@ identical.
 
 - **Dual-surface metadata.** The `DocumentEnvelope` fields all live in `output`, so
   `format-parity` drags them into both `structuredContent` and the `format()` markdown twin
-  automatically — every client sees `documentId`, `resourceUri`, `downloadUrl`/inline note,
-  size, and TTL. `format()` renders a human-readable block ("Rendered a 3-page PDF (142 KB).
-  Download: …  · expires in 15 min").
+  automatically — every client sees `documentId`, `resourceUri`, size, TTL, and the inline
+  base64 (or its absence note when over the ceiling). `downloadUrl` is reserved and not emitted
+  in v1, so `format()` always renders its absence note. The block leads with an action-specific
+  sentence ("Rendered a 3-page PDF (142 KB).") followed by the labeled fields.
 - **Inline vs. link by size.** `inlineBase64` is populated only when `byteSize ≤
   DOCGEN_INLINE_MAX_BYTES`; above that the field is omitted and `format()` states the doc is
   available via the resource/URL. This keeps a 20 MB workbook from being base64-inlined into a
@@ -431,7 +435,7 @@ identical.
   the deferred `chromium` engine. Shipping the flag now (rejected at startup until
   implemented) reserves the seam so adding Chromium later is additive, not a refactor.
 - **One shared `DocumentEnvelope` across all four tools.** Identical delivery shape means the
-  three writers and the reader are interchangeable to the agent, and the hosted-URL vs.
+  three writers and the reader are interchangeable to the agent, and the resource-URI vs.
   inline-base64 split is one decision in one place rather than per-tool.
 - **Bytes and metadata under two separate `ctx.state` keys.** The small meta record and the
   base64 blob are stored independently (`doc/meta/{id}`, `doc/blob/{id}`) so a metadata read

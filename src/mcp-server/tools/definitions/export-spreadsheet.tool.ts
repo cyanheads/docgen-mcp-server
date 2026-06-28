@@ -38,6 +38,13 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
       recovery: 'Provide at least one sheet with a name and a rows array (rows may be empty).',
     },
     {
+      reason: 'invalid_sheet_name',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'A worksheet name is blank, over 31 characters, contains * ? : \\ / [ ], begins or ends with an apostrophe, or duplicates another sheet name (case-insensitive).',
+      recovery:
+        'Rename the sheet to a unique 1–31 character label without * ? : \\ / [ ] and with no leading or trailing apostrophe.',
+    },
+    {
       reason: 'document_too_large',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The rendered workbook exceeded the configured maximum document size.',

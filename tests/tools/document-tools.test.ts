@@ -90,6 +90,25 @@ describe('docgen_render_pdf', () => {
     });
   });
 
+  it('throws invalid_source when data is given with an html source (data would be ignored)', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
+    const input = renderPdfTool.input.parse({
+      source: { html: '<p>html wins</p>', data: { unexpected: 'ignored' } },
+    });
+    await expect(renderPdfTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_source' },
+    });
+  });
+
+  it('throws invalid_source when data is given with a markdown source', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
+    const input = renderPdfTool.input.parse({ source: { markdown: '# md', data: { x: 1 } } });
+    await expect(renderPdfTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_source' },
+    });
+  });
+
   it('renders a template + data through the handler', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
     const input = renderPdfTool.input.parse({
@@ -182,6 +201,17 @@ describe('docgen_export_spreadsheet', () => {
       data: { reason: 'empty_workbook' },
     });
   });
+
+  it('throws invalid_sheet_name through the handler for an invalid worksheet name', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: exportSpreadsheetTool.errors });
+    const input = exportSpreadsheetTool.input.parse({
+      sheets: [{ name: 'Bad:Name', rows: [{ a: 1 }] }],
+    });
+    await expect(exportSpreadsheetTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'invalid_sheet_name' },
+    });
+  });
 });
 
 describe('docgen_fill_form', () => {
@@ -207,6 +237,22 @@ describe('docgen_fill_form', () => {
     expect(Buffer.from(bytes.slice(0, 5)).toString('latin1')).toBe(PDF_MAGIC);
     const loaded = await PDFDocument.load(bytes);
     expect(loaded.getForm().getTextField('name').getText()).toBe('Casey');
+  });
+
+  it('accepts a line-wrapped base64 PDF (CLI / MIME-encoder output)', async () => {
+    const ctx = createMockContext({ tenantId: 't1', errors: fillFormTool.errors });
+    // Wrap at 40 chars with both LF and CRLF, as `base64`/MIME encoders do.
+    const wrapped = (await makeFormBase64()).replace(/(.{40})/g, '$1\r\n');
+    const input = fillFormTool.input.parse({
+      sourcePdf: { base64: `\n${wrapped}\n` },
+      fields: { name: 'Wrapped' },
+    });
+    const result = await fillFormTool.handler(input, ctx);
+    const bytes = decode(result.document.inlineBase64!);
+    expect(Buffer.from(bytes.slice(0, 5)).toString('latin1')).toBe(PDF_MAGIC);
+    expect(await (await PDFDocument.load(bytes)).getForm().getTextField('name').getText()).toBe(
+      'Wrapped',
+    );
   });
 
   it('throws invalid_pdf_source for malformed base64', async () => {

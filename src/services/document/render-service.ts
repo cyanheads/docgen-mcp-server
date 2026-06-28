@@ -29,6 +29,10 @@ const PAGE_SIZES: Record<string, [number, number]> = {
 const UNIT_TO_PT: Record<string, number> = { px: 0.75, pt: 1, mm: 2.83465, cm: 28.3465, in: 72 };
 const DEFAULT_MARGIN_PT = 54; // 0.75in
 
+/** Excel's worksheet-name limits — applied before any sheet is added to the workbook. */
+const MAX_SHEET_NAME_LENGTH = 31;
+const FORBIDDEN_SHEET_NAME_CHARS = /[*?:\\/[\]]/;
+
 /** Parses a CSS length ("10mm", "0.5in") to points; falls back to the default. */
 function lengthToPt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
@@ -78,12 +82,14 @@ export class RenderService {
   renderSpreadsheet(sheets: Sheet[], ctx: Context): Promise<RenderResult> {
     const { renderTimeoutMs } = getServerConfig();
     return this.withTimeout(renderTimeoutMs, ctx, async () => {
+      this.assertValidSheetNames(sheets, ctx);
+
       const workbook = new ExcelJS.Workbook();
       workbook.creator = 'docgen-mcp-server';
       workbook.created = new Date();
 
       for (const sheet of sheets) {
-        const ws = workbook.addWorksheet(sheet.name || 'Sheet');
+        const ws = workbook.addWorksheet(sheet.name);
         const columns = this.resolveColumns(sheet);
         ws.columns = columns.map((c) => ({
           header: c.header,
@@ -405,6 +411,25 @@ export class RenderService {
     };
   }
 
+  /**
+   * Validates every worksheet name against Excel's constraints BEFORE any sheet is
+   * created, so a bad name surfaces as the typed `invalid_sheet_name` reason rather
+   * than a generic ExcelJS throw (forbidden character, duplicate) or a silent
+   * over-31-character truncation. Uniqueness is case-insensitive, matching Excel.
+   */
+  private assertValidSheetNames(sheets: Sheet[], ctx: Context): void {
+    const seen = new Set<string>();
+    for (const { name } of sheets) {
+      const problem = describeSheetNameProblem(name, seen);
+      if (problem) {
+        throw invalidParams(`Invalid worksheet name: ${problem}`, {
+          reason: 'invalid_sheet_name',
+          ...ctx.recoveryFor('invalid_sheet_name'),
+        });
+      }
+    }
+  }
+
   /** Resolves the effective column set for a sheet, deriving from row keys if absent. */
   private resolveColumns(
     sheet: Sheet,
@@ -584,6 +609,31 @@ function sanitizeForFont(text: string): string {
     }
   }
   return out;
+}
+
+/**
+ * Returns a human description of the first Excel-constraint violation in a
+ * worksheet name, or `null` when the name is valid. Mutates `seen` with the
+ * lower-cased name so a later case-insensitive duplicate is caught.
+ */
+function describeSheetNameProblem(name: string, seen: Set<string>): string | null {
+  if (name.trim().length === 0) return 'a name is blank — provide a non-empty tab label.';
+  if (name.length > MAX_SHEET_NAME_LENGTH) {
+    return `"${name}" is ${name.length} characters — Excel caps tab names at ${MAX_SHEET_NAME_LENGTH}.`;
+  }
+  const forbidden = name.match(FORBIDDEN_SHEET_NAME_CHARS);
+  if (forbidden) {
+    return `"${name}" contains "${forbidden[0]}" — Excel forbids * ? : \\ / [ ] in tab names.`;
+  }
+  if (name.startsWith("'") || name.endsWith("'")) {
+    return `"${name}" begins or ends with an apostrophe, which Excel forbids in tab names.`;
+  }
+  const key = name.toLowerCase();
+  if (seen.has(key)) {
+    return `"${name}" duplicates another sheet — names must be unique (case-insensitive).`;
+  }
+  seen.add(key);
+  return null;
 }
 
 // --- Init/accessor pattern ---

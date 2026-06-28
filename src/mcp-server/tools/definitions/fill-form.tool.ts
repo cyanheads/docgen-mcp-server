@@ -17,8 +17,10 @@ import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 /** Decodes a base64 string to bytes, returning null when it is not valid base64. */
 function decodeBase64Pdf(b64: string): Uint8Array | null {
-  const cleaned = b64.replace(/^data:application\/pdf;base64,/, '').trim();
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned) || cleaned.length === 0) return null;
+  // Strip ASCII whitespace before validating — base64 from CLIs, MIME encoders, and
+  // copy/paste is routinely line-wrapped — then drop an optional data-URI prefix.
+  const cleaned = b64.replace(/[ \t\n\r\f\v]+/g, '').replace(/^data:application\/pdf;base64,/, '');
+  if (cleaned.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) return null;
   try {
     const bytes = new Uint8Array(Buffer.from(cleaned, 'base64'));
     return bytes.byteLength > 0 ? bytes : null;
