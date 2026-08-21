@@ -28,6 +28,11 @@ function decode(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
 
+/** Bridges Node 26's generic Buffer type to exceljs's pre-generic declaration. */
+function excelBuffer(bytes: Uint8Array): Parameters<ExcelJS.Workbook['xlsx']['load']>[0] {
+  return Buffer.from(bytes) as unknown as Parameters<ExcelJS.Workbook['xlsx']['load']>[0];
+}
+
 beforeEach(() => {
   resetServerConfig();
   vi.unstubAllEnvs();
@@ -190,7 +195,7 @@ describe('docgen_export_spreadsheet', () => {
     const bytes = decode(env.inlineBase64!);
     expect([...bytes.slice(0, 4)]).toEqual(XLSX_MAGIC);
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(Buffer.from(bytes));
+    await wb.xlsx.load(excelBuffer(bytes));
     expect(wb.getWorksheet('Data')).toBeDefined();
   });
 
@@ -345,10 +350,13 @@ describe('docgen_get_document + resource', () => {
   // A mock context owns a private in-memory store, so the read path must reuse
   // the SAME context the write path used. Merge the error contracts so the one
   // ctx can `fail` with either tool's reasons.
-  const mergedRenderGetErrors = [...renderPdfTool.errors, ...getDocumentTool.errors] as const;
+  const mergedRenderGetErrors = [
+    ...(renderPdfTool.errors ?? []),
+    ...(getDocumentTool.errors ?? []),
+  ] as const;
   const mergedExportResourceErrors = [
-    ...exportSpreadsheetTool.errors,
-    ...documentResource.errors,
+    ...(exportSpreadsheetTool.errors ?? []),
+    ...(documentResource.errors ?? []),
   ] as const;
 
   it('re-fetches a rendered document by id with the same envelope', async () => {
@@ -416,7 +424,7 @@ describe('docgen_get_document + resource', () => {
     const id = rendered.document.documentId;
 
     const uri = new URL(`docgen://document/${id}`);
-    const data = await documentResource.handler({ documentId: id }, { ...ctx, uri });
+    const data = await documentResource.handler({ documentId: id }, Object.assign(ctx, { uri }));
     const contents = documentResource.format!(data, { uri, mimeType: 'application/octet-stream' });
 
     const blob = contents.find(

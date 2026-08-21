@@ -18,6 +18,11 @@ import { PDF_MIME, XLSX_MIME } from '@/services/document/types.js';
 const PDF_MAGIC = '%PDF-';
 const XLSX_MAGIC = [0x50, 0x4b, 0x03, 0x04]; // PK\x03\x04
 
+/** Bridges Node 26's generic Buffer type to exceljs's pre-generic declaration. */
+function excelBuffer(bytes: Uint8Array): Parameters<ExcelJS.Workbook['xlsx']['load']>[0] {
+  return Buffer.from(bytes) as unknown as Parameters<ExcelJS.Workbook['xlsx']['load']>[0];
+}
+
 /** Decodes the leading ASCII bytes of a buffer for magic-byte assertions. */
 function leadingAscii(bytes: Uint8Array, n: number): string {
   return Buffer.from(bytes.slice(0, n)).toString('latin1');
@@ -51,6 +56,23 @@ describe('RenderService', () => {
     return new Uint8Array(await pdf.save());
   }
 
+  /** Builds choice-field variants for exercising the form dispatch surface. */
+  async function makeChoiceFormPdf(): Promise<Uint8Array> {
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage([400, 300]);
+    const form = pdf.getForm();
+    const dropdown = form.createDropdown('dropdown');
+    dropdown.addOptions(['red', 'blue']);
+    dropdown.addToPage(page, { x: 20, y: 230, width: 120, height: 20 });
+    const options = form.createOptionList('options');
+    options.addOptions(['alpha', 'beta']);
+    options.addToPage(page, { x: 20, y: 140, width: 120, height: 70 });
+    const radio = form.createRadioGroup('radio');
+    radio.addOptionToPage('yes', page, { x: 20, y: 100, width: 15, height: 15 });
+    radio.addOptionToPage('no', page, { x: 60, y: 100, width: 15, height: 15 });
+    return new Uint8Array(await pdf.save());
+  }
+
   describe('renderPdf', () => {
     it('renders HTML to a valid PDF (decodes to %PDF- magic bytes)', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
@@ -73,7 +95,7 @@ describe('RenderService', () => {
     it('renders markdown to a valid PDF', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
       const md =
-        '# Report\n\nSome **bold** text.\n\n- alpha\n- beta\n\n| A | B |\n|---|---|\n| 1 | 2 |';
+        '# Report\n\nSome **bold** text.\n\n- alpha\n- beta\n\n3. third\n4. fourth\n\n| A | B |\n|---|---|\n| 1 | 2 |';
       const result = await svc.renderPdf({ markdown: md }, defaultPage, ctx);
       expect(leadingAscii(result.bytes, 5)).toBe(PDF_MAGIC);
       await expect(PDFDocument.load(result.bytes)).resolves.toBeDefined();
@@ -131,6 +153,33 @@ describe('RenderService', () => {
       const result = await svc.renderPdf({ html: paras }, defaultPage, ctx);
       expect(result.pageCount).toBeGreaterThan(1);
     });
+
+    it('renders rules, spacers, and hard-wrapped Unicode', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const result = await svc.renderPdf(
+        {
+          html: `<h3>Layout</h3><hr><br><p>‘${'unbreakable'.repeat(30)}’</p>`,
+        },
+        PageOptionsSchema.parse({
+          size: 'A5',
+          margin: { top: '0pt', right: '1in', bottom: '0pt', left: '1in' },
+        }),
+        ctx,
+      );
+      expect(leadingAscii(result.bytes, 5)).toBe(PDF_MAGIC);
+    });
+
+    it('honors an already-aborted render context without processing blocks', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const ctx = createMockContext({ tenantId: 't1', signal: controller.signal });
+      const html = Array.from(
+        { length: 200 },
+        (_, index) => `<p>Paragraph ${index}: content that would normally paginate.</p>`,
+      ).join('');
+      const result = await svc.renderPdf({ html }, defaultPage, ctx);
+      expect(result.pageCount).toBe(1);
+    });
   });
 
   describe('renderSpreadsheet', () => {
@@ -145,7 +194,7 @@ describe('RenderService', () => {
               { quarter: 'Q2', revenue: 150, profit: 35 },
             ],
             columns: [
-              { key: 'quarter', header: 'Quarter', type: 'string' },
+              { key: 'quarter', header: 'Quarter', type: 'string', width: 14 },
               { key: 'revenue', header: 'Revenue', type: 'number', format: '#,##0.00' },
               { key: 'profit', header: 'Profit', type: 'number' },
             ],
@@ -160,7 +209,7 @@ describe('RenderService', () => {
 
       // Round-trip: the bytes must load as a real workbook with the data.
       const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(Buffer.from(result.bytes));
+      await wb.xlsx.load(excelBuffer(result.bytes));
       const ws = wb.getWorksheet('Financials');
       expect(ws).toBeDefined();
       expect(ws!.getRow(1).getCell(1).value).toBe('Quarter');
@@ -175,7 +224,7 @@ describe('RenderService', () => {
       );
       expect([...result.bytes.slice(0, 4)]).toEqual(XLSX_MAGIC);
       const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(Buffer.from(result.bytes));
+      await wb.xlsx.load(excelBuffer(result.bytes));
       expect(wb.getWorksheet('Empty')!.getRow(1).getCell(1).value).toBe('A');
     });
 
@@ -190,7 +239,7 @@ describe('RenderService', () => {
       );
       expect(result.sheetCount).toBe(2);
       const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(Buffer.from(result.bytes));
+      await wb.xlsx.load(excelBuffer(result.bytes));
       expect(wb.worksheets.map((w) => w.name)).toEqual(['One', 'Two']);
     });
   });
@@ -318,6 +367,20 @@ describe('RenderService', () => {
       const loaded = await PDFDocument.load(result.bytes);
       expect(loaded.getForm().getCheckBox('agree').isChecked()).toBe(false);
     });
+
+    it('fills dropdown, option-list, and radio-group fields', async () => {
+      const ctx = createMockContext({ tenantId: 't1' });
+      const result = await svc.fillForm(
+        await makeChoiceFormPdf(),
+        { dropdown: 'blue', options: 'beta', radio: 'yes' },
+        false,
+        ctx,
+      );
+      const form = (await PDFDocument.load(result.bytes)).getForm();
+      expect(form.getDropdown('dropdown').getSelected()).toEqual(['blue']);
+      expect(form.getOptionList('options').getSelected()).toEqual(['beta']);
+      expect(form.getRadioGroup('radio').getSelected()).toBe('yes');
+    });
   });
 
   describe('render bounds', () => {
@@ -367,7 +430,7 @@ describe('RenderService', () => {
     /** Loads the first worksheet of a rendered workbook for cell assertions. */
     async function firstSheet(bytes: Uint8Array): Promise<ExcelJS.Worksheet> {
       const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(Buffer.from(bytes));
+      await wb.xlsx.load(excelBuffer(bytes));
       return wb.worksheets[0]!;
     }
 

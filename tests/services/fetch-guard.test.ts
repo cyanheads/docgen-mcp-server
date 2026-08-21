@@ -27,6 +27,17 @@ vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]); // %PDF-
 
+/** Resolves only when the supplied operation rejects with a framework McpError. */
+async function rejectedMcpError(operation: Promise<unknown>): Promise<McpError> {
+  try {
+    await operation;
+  } catch (error) {
+    if (error instanceof McpError) return error;
+    throw error;
+  }
+  throw new Error('Expected the operation to reject with McpError.');
+}
+
 /** Builds a Response the stubbed fetch returns; `body` rides as a real stream. */
 function pdfResponse(
   body: Uint8Array = PDF_BYTES,
@@ -277,7 +288,7 @@ describe('fetchPdfGuarded error-leak defense (stubbed fetch)', () => {
   it('normalizes a raw network rejection to a clean source_unfetchable error', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
     fetchMock.mockRejectedValueOnce(new TypeError('fetch failed: ECONNRESET'));
-    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+    const err = await rejectedMcpError(fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx));
     expect(err).toBeInstanceOf(McpError);
     expect(err.data).toMatchObject({ reason: 'source_unfetchable' });
     for (const key of LEAK_KEYS) expect(err.data).not.toHaveProperty(key);
@@ -303,7 +314,7 @@ describe('fetchPdfGuarded error-leak defense (stubbed fetch)', () => {
       ),
     );
 
-    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+    const err = await rejectedMcpError(fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx));
 
     expect(err).toBeInstanceOf(McpError);
     expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
@@ -329,7 +340,7 @@ describe('fetchPdfGuarded error-leak defense (stubbed fetch)', () => {
       controller.abort();
       return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
     });
-    const err = await fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx).catch((e) => e as McpError);
+    const err = await rejectedMcpError(fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx));
     expect(err).toBeInstanceOf(McpError);
     expect(err.data).toMatchObject({ reason: 'source_unfetchable' });
     for (const key of LEAK_KEYS) expect(err.data).not.toHaveProperty(key);
