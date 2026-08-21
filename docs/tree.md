@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-06-28 13:42:51
+Generated on: 2026-08-21 22:59:21
 
 ```text
 docgen-mcp-server/
@@ -10,10 +10,14 @@ docgen-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -153,16 +157,24 @@ docgen-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── fuzz/
+│   │   └── get-document.fuzz.test.ts
+│   ├── integration/
+│   │   └── tool-contracts.int.test.ts
 │   ├── resources/
 │   ├── services/
 │   │   ├── document-store.test.ts
 │   │   ├── fetch-guard.test.ts
+│   │   ├── html-blocks.test.ts
 │   │   ├── render-service.test.ts
 │   │   └── render-types.test.ts
+│   ├── smoke/
+│   │   └── definitions.smoke.test.ts
 │   └── tools/
 │       └── document-tools.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md

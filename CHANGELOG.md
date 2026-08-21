@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-08-21
+
+MCP SDK v2 and mcp-ts-core 0.12.3 adoption, with Bun 1.4/TypeScript 7 tooling, expanded contract coverage, and portable MCPB/Docker packaging.
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-06-28
 
 Input-validation fixes across the writer tools: worksheet names are checked against Excel's constraints before render, fill_form accepts line-wrapped base64 PDFs, and render_pdf rejects data supplied without a template. Plus a design-doc correction of stale downloadUrl references.
