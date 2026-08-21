@@ -3,6 +3,7 @@
     "ignores": [
       "@types/*",
       "pino-pretty",
+      "@socketsecurity/bun-security-scanner",
       "typescript",
       "tsc-alias",
       "depcheck",

@@ -18,15 +18,15 @@ import type { PageOptions, PdfSource, Sheet } from './render-types.js';
 import { PDF_MIME, type RenderResult, XLSX_MIME } from './types.js';
 
 /** Page dimensions in PostScript points (1pt = 1/72in), portrait orientation. */
-const PAGE_SIZES: Record<string, [number, number]> = {
+const PAGE_SIZES = {
   A3: [841.89, 1190.55],
   A4: [595.28, 841.89],
   A5: [419.53, 595.28],
   Letter: [612, 792],
   Legal: [612, 1008],
-};
+} satisfies Record<PageOptions['size'], readonly [number, number]>;
 
-const UNIT_TO_PT: Record<string, number> = { px: 0.75, pt: 1, mm: 2.83465, cm: 28.3465, in: 72 };
+const UNIT_TO_PT = { px: 0.75, pt: 1, mm: 2.83465, cm: 28.3465, in: 72 } as const;
 const DEFAULT_MARGIN_PT = 54; // 0.75in
 
 /** Excel's worksheet-name limits — applied before any sheet is added to the workbook. */
@@ -38,7 +38,7 @@ function lengthToPt(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const m = value.match(/^([\d.]+)(px|pt|mm|cm|in)$/);
   if (!m) return fallback;
-  return Number(m[1]) * (UNIT_TO_PT[m[2]!] ?? 1);
+  return Number(m[1]) * UNIT_TO_PT[m[2] as keyof typeof UNIT_TO_PT];
 }
 
 /** Result of a PDF render: the bytes plus the page count and degraded flag. */
@@ -246,7 +246,7 @@ export class RenderService {
     const font = await pdf.embedFont(StandardFonts.Helvetica);
     const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
 
-    const [pw, ph] = PAGE_SIZES[opts.size] ?? PAGE_SIZES.Letter!;
+    const [pw, ph] = PAGE_SIZES[opts.size];
     const [pageW, pageH] = opts.orientation === 'landscape' ? [ph, pw] : [pw, ph];
     const mTop = lengthToPt(opts.margin?.top, DEFAULT_MARGIN_PT);
     const mRight = lengthToPt(opts.margin?.right, DEFAULT_MARGIN_PT);
@@ -582,7 +582,8 @@ function hardBreak(word: string, font: PDFFont, size: number, maxWidth: number):
 function sanitizeForFont(text: string): string {
   let out = '';
   for (const ch of text) {
-    const cp = ch.codePointAt(0)!;
+    const cp = ch.codePointAt(0);
+    if (cp === undefined) continue;
     switch (cp) {
       case 0x2018: // left single quote
       case 0x2019: // right single quote

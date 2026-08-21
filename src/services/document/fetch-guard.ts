@@ -96,7 +96,8 @@ export function isBlockedIp(ip: string): boolean {
     if (lower.startsWith('ff')) return true; // multicast
     // IPv4-mapped (::ffff:a.b.c.d) — re-check the embedded v4 address.
     const mapped = lower.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    if (mapped) return isBlockedIp(mapped[1]!);
+    const embeddedIpv4 = mapped?.[1];
+    if (embeddedIpv4) return isBlockedIp(embeddedIpv4);
     return false;
   }
 

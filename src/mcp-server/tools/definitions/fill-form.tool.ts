@@ -106,8 +106,8 @@ export const fillFormTool = tool('docgen_fill_form', {
 
     const render = getRenderService();
     let sourceBytes: Uint8Array;
-    if (hasBase64) {
-      const decoded = decodeBase64Pdf(sourcePdf.base64!);
+    if (sourcePdf.base64 !== undefined && sourcePdf.base64 !== '') {
+      const decoded = decodeBase64Pdf(sourcePdf.base64);
       if (!decoded) {
         throw ctx.fail('invalid_pdf_source', undefined, {
           ...ctx.recoveryFor('invalid_pdf_source'),
@@ -116,7 +116,10 @@ export const fillFormTool = tool('docgen_fill_form', {
       sourceBytes = decoded;
     } else {
       // SSRF guard + size cap live inside fetchSourcePdf; it throws source_unfetchable.
-      sourceBytes = await render.fetchSourcePdf(sourcePdf.url!, ctx);
+      if (sourcePdf.url === undefined || sourcePdf.url === '') {
+        throw ctx.fail('invalid_source', undefined, { ...ctx.recoveryFor('invalid_source') });
+      }
+      sourceBytes = await render.fetchSourcePdf(sourcePdf.url, ctx);
     }
 
     const result = await render.fillForm(sourceBytes, input.fields, input.flatten, ctx);
