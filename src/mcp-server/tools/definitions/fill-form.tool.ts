@@ -59,6 +59,7 @@ export const fillFormTool = tool('docgen_fill_form', {
       when: 'The source PDF has no AcroForm fields to fill (a flat or XFA-only PDF).',
       recovery:
         'Confirm the PDF is a fillable AcroForm; a flat or XFA-only PDF cannot be filled here.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_pdf_source',
@@ -73,6 +74,7 @@ export const fillFormTool = tool('docgen_fill_form', {
       when: 'sourcePdf.url did not return a fetchable PDF — non-2xx, wrong content-type, too large, or blocked by the SSRF guard.',
       recovery:
         'Verify the URL is public https serving application/pdf, or pass the PDF as base64 to skip the fetch entirely.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_source',
@@ -85,12 +87,14 @@ export const fillFormTool = tool('docgen_fill_form', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The filled PDF exceeded the configured maximum document size.',
       recovery: 'Use a smaller source PDF and render again.',
+      thrownBy: 'service',
     },
     {
       reason: 'render_timeout',
       code: JsonRpcErrorCode.Timeout,
       when: 'Filling exceeded the configured time budget.',
       recovery: 'Use a smaller or simpler source PDF, then retry.',
+      thrownBy: 'service',
     },
   ],
 

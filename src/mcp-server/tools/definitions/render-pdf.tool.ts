@@ -50,18 +50,21 @@ export const renderPdfTool = tool('docgen_render_pdf', {
       when: 'The template referenced a data key absent from the data object, or was malformed.',
       recovery:
         "Check the template's {{referenced}} fields against the keys present in the data object.",
+      thrownBy: 'service',
     },
     {
       reason: 'document_too_large',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The rendered PDF exceeded the configured maximum document size.',
       recovery: 'Reduce the content (fewer pages, smaller images) and render again.',
+      thrownBy: 'service',
     },
     {
       reason: 'render_timeout',
       code: JsonRpcErrorCode.Timeout,
       when: 'Rendering exceeded the configured time budget.',
       recovery: 'Simplify the document or split it into smaller renders, then retry.',
+      thrownBy: 'service',
     },
   ],
 

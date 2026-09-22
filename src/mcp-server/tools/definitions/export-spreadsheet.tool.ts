@@ -43,6 +43,7 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
       when: 'A worksheet name is blank, over 31 characters, contains * ? : \\ / [ ], begins or ends with an apostrophe, or duplicates another sheet name (case-insensitive).',
       recovery:
         'Rename the sheet to a unique 1–31 character label without * ? : \\ / [ ] and with no leading or trailing apostrophe.',
+      thrownBy: 'service',
     },
     {
       reason: 'document_too_large',
@@ -50,12 +51,14 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
       when: 'The rendered workbook exceeded the configured maximum document size.',
       recovery:
         'Reduce the number of rows or sheets and render again, or split into multiple workbooks.',
+      thrownBy: 'service',
     },
     {
       reason: 'render_timeout',
       code: JsonRpcErrorCode.Timeout,
       when: 'Rendering exceeded the configured time budget.',
       recovery: 'Reduce the workbook size or split it into smaller renders, then retry.',
+      thrownBy: 'service',
     },
   ],
 
