@@ -21,6 +21,7 @@ import { initRenderService } from './services/document/render-service.js';
 await createApp({
   name: 'docgen-mcp-server',
   title: 'docgen-mcp-server',
+  sessionMode: 'stateless',
   tools: [renderPdfTool, exportSpreadsheetTool, fillFormTool, getDocumentTool],
   resources: [documentResource],
   instructions:
