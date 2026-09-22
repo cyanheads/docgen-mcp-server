@@ -64,6 +64,24 @@ function stripTags(html: string): string {
 }
 
 /**
+ * Repeatedly removes `re`'s matches until none remain. A single pass can leave
+ * a new match behind — stripping the inner `<script>` from `<scr<script>ipt>`
+ * reconstitutes an outer `<script>` — so this loops to a fixed point instead.
+ */
+function stripRepeatedly(input: string, re: RegExp, onMatch?: () => void): string {
+  let out = input;
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(re, () => {
+      onMatch?.();
+      return '';
+    });
+  } while (out !== prev);
+  return out;
+}
+
+/**
  * Converts a markdown string to the block model via marked's lexer. Inline
  * emphasis/links collapse to their text (the lightweight engine has one font),
  * which sets `degraded` only for genuinely unsupported constructs (images, raw
@@ -167,16 +185,15 @@ export function htmlToBlocks(html: string): BlockDocument {
   // Strip non-rendered regions outright; their presence is not itself degradation.
   // Closers match the way an HTML parser reads them: an end tag may carry
   // whitespace or attributes (`</script >`), and a comment may close with `--!>`.
-  let body = html.replace(/<!--[\s\S]*?--!?>/g, '');
-  const headMatch = body.match(/<head\b[^>]*>([\s\S]*?)<\/head\b[^>]*>/i);
-  if (headMatch) body = body.replace(headMatch[0], '');
-  body = body.replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, () => {
+  // Each strip loops to a fixed point so a removed inner match can't reconstitute
+  // an outer one from the surrounding fragments.
+  let body = stripRepeatedly(html, /<!--[\s\S]*?--!?>/gi);
+  body = stripRepeatedly(body, /<head\b[^>]*>[\s\S]*?<\/head\b[^>]*>/gi);
+  body = stripRepeatedly(body, /<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, () => {
     degraded = true;
-    return '';
   });
-  body = body.replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, () => {
+  body = stripRepeatedly(body, /<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, () => {
     degraded = true;
-    return '';
   });
   if (/\bstyle\s*=\s*["']/i.test(body) || /\bclass\s*=\s*["']/i.test(body)) degraded = true;
   if (/<img\b/i.test(body)) degraded = true;
