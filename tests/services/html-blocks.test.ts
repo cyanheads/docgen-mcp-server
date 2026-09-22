@@ -138,6 +138,24 @@ describe('htmlToBlocks', () => {
       ),
     ).toEqual({ blocks: [{ kind: 'paragraph', text: 'Body text' }], degraded: true });
   });
+
+  it('does not let a reassembled <script> pair leak its content past one strip pass', () => {
+    // Stripping the inner <script>x()</script> leaves "<scr" + "ipt>leak()</script>",
+    // which reassembles into a second, genuine <script>leak()</script> pair. A
+    // single-pass strip misses it and "leak()" survives as visible paragraph text.
+    const result = htmlToBlocks('<p>Before <scr<script>x()</script>ipt>leak()</script> After</p>');
+    expect(result.blocks).toEqual([{ kind: 'paragraph', text: 'Before After' }]);
+    expect(result.degraded).toBe(true);
+  });
+
+  it('does not let a reassembled comment leak trailing content past one strip pass', () => {
+    // Stripping the inner <!-- z --> leaves "<!-" + "- X>LEAK -->", which
+    // reassembles into <!-- X>LEAK -->. A single-pass strip removes only up to
+    // the embedded ">" (the tag-stripping regex stops at the first ">"), leaving
+    // "LEAK -->" as visible text.
+    const result = htmlToBlocks('<p>Shown <!-<!-- z -->- X>LEAK --> more</p>');
+    expect(result.blocks).toEqual([{ kind: 'paragraph', text: 'Shown more' }]);
+  });
 });
 
 describe('markdownToBlocks character references', () => {
