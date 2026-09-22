@@ -102,4 +102,48 @@ describe('htmlToBlocks', () => {
       degraded: false,
     });
   });
+
+  it('decodes each character reference exactly once', () => {
+    expect(htmlToBlocks('<p>&amp;lt;b&amp;gt; &amp;amp; &amp;#39;</p>').blocks).toEqual([
+      { kind: 'paragraph', text: '&lt;b&gt; &amp; &#39;' },
+    ]);
+    expect(
+      htmlToBlocks('<p>&lt;&gt;&quot;&#39;&apos;&#x27;&#169;&#x2014;&AMP;x&nbsp;y</p>').blocks,
+    ).toEqual([{ kind: 'paragraph', text: `<>"'''©—&x y` }]);
+  });
+
+  it('leaves unknown, prototype-named, and out-of-range references verbatim', () => {
+    expect(
+      htmlToBlocks('<p>&copy; &constructor; &__proto__; &#0; &#xD800; &#x110000;</p>').blocks,
+    ).toEqual([
+      { kind: 'paragraph', text: '&copy; &constructor; &__proto__; &#0; &#xD800; &#x110000;' },
+    ]);
+  });
+
+  it('strips script, style, head, and comment regions whose closers carry whitespace', () => {
+    const blocks = htmlToBlocks(
+      "<p>Before</p><script>alert('x')</script ><SCRIPT>leak()</SCRIPT\n><style>p{color:red}</style\t><script>x()</script data-x><p>After</p>",
+    );
+    expect(blocks).toEqual({
+      blocks: [
+        { kind: 'paragraph', text: 'Before' },
+        { kind: 'paragraph', text: 'After' },
+      ],
+      degraded: true,
+    });
+
+    expect(
+      htmlToBlocks(
+        '<head><title>Title</title></head >Body <script>hidden()</script > text<!-- a > b --!>',
+      ),
+    ).toEqual({ blocks: [{ kind: 'paragraph', text: 'Body text' }], degraded: true });
+  });
+});
+
+describe('markdownToBlocks character references', () => {
+  it('decodes an escaped entity in markdown text once', () => {
+    expect(markdownToBlocks('Literal &amp;lt;tag&amp;gt;').blocks).toEqual([
+      { kind: 'paragraph', text: 'Literal &lt;tag&gt;' },
+    ]);
+  });
 });

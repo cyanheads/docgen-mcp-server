@@ -25,16 +25,36 @@ export interface BlockDocument {
   degraded: boolean;
 }
 
-/** Collapses whitespace and decodes the handful of HTML entities we emit. */
+/** Named character references the converter decodes; any other name stays verbatim. */
+const NAMED_ENTITIES = new Map([
+  ['nbsp', ' '],
+  ['amp', '&'],
+  ['lt', '<'],
+  ['gt', '>'],
+  ['quot', '"'],
+  ['apos', "'"],
+]);
+
+/**
+ * Decodes one character reference. Numeric references outside the Unicode scalar
+ * range (NUL, surrogates, past U+10FFFF) and unknown names are returned verbatim.
+ */
+function decodeReference(match: string, ref: string): string {
+  if (ref[0] !== '#') return NAMED_ENTITIES.get(ref.toLowerCase()) ?? match;
+  const codePoint = /^#x/i.test(ref) ? Number.parseInt(ref.slice(2), 16) : Number(ref.slice(1));
+  const valid =
+    codePoint > 0 && codePoint <= 0x10ffff && (codePoint < 0xd800 || codePoint > 0xdfff);
+  return valid ? String.fromCodePoint(codePoint) : match;
+}
+
+/**
+ * Collapses whitespace and decodes character references in a single pass, so an
+ * `&` produced by decoding `&amp;` is never read as the start of another reference.
+ */
 function normalizeText(raw: string): string {
   return raw
     .replace(/\s+/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, decodeReference)
     .trim();
 }
 
@@ -145,14 +165,16 @@ export function htmlToBlocks(html: string): BlockDocument {
   let degraded = false;
 
   // Strip non-rendered regions outright; their presence is not itself degradation.
-  let body = html.replace(/<!--[\s\S]*?-->/g, '');
-  const headMatch = body.match(/<head\b[^>]*>([\s\S]*?)<\/head>/i);
+  // Closers match the way an HTML parser reads them: an end tag may carry
+  // whitespace or attributes (`</script >`), and a comment may close with `--!>`.
+  let body = html.replace(/<!--[\s\S]*?--!?>/g, '');
+  const headMatch = body.match(/<head\b[^>]*>([\s\S]*?)<\/head\b[^>]*>/i);
   if (headMatch) body = body.replace(headMatch[0], '');
-  body = body.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, () => {
+  body = body.replace(/<script\b[^>]*>[\s\S]*?<\/script\b[^>]*>/gi, () => {
     degraded = true;
     return '';
   });
-  body = body.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, () => {
+  body = body.replace(/<style\b[^>]*>[\s\S]*?<\/style\b[^>]*>/gi, () => {
     degraded = true;
     return '';
   });
