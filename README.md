@@ -21,87 +21,83 @@
 
 ---
 
-## Why docgen
+## Overview
 
-An agent can write a perfect invoice's HTML, a clean data table, or a filled-form field map as tokens — but it cannot emit bytes. docgen is the renderer that closes the gap: structured content in, a downloadable binary document out. It wraps no external API; the "service" is a bundled rendering stack (`pdf-lib` for PDF and form fill, `exceljs` for spreadsheets, `marked` for the markdown path). Every output is stored tenant-scoped with a short TTL and handed back as a stable resource URI plus inline base64 when small enough.
+Document rendering built on a bundled stack — pdf-lib for PDF and AcroForm fill, exceljs for spreadsheets, marked for markdown. Render HTML, markdown, or template data to PDF, export tabular rows to xlsx, and fill AcroForm PDF forms from any MCP client. Runs as a stdio process or a local Streamable HTTP server.
 
-## Tools
-
-Four tools sharing one delivery shape — three renderers that **write** a stored document and one **read** that re-fetches by id. Every render/export/fill call returns a `DocumentEnvelope` (a `documentId`, a `docgen://document/{id}` resource URI, byte size, TTL, and inline base64 when the artifact is small enough); `docgen_get_document` returns the same envelope for an id you already hold.
+### Tools
 
 | Tool | Description |
 |:---|:---|
-| `docgen_render_pdf` | Render HTML, markdown, or a `{{key}}` template + data object to a downloadable PDF. |
-| `docgen_export_spreadsheet` | Render one or more named worksheets of row objects to a downloadable `.xlsx` workbook. |
-| `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF (base64 or https URL) and optionally flatten it. |
-| `docgen_get_document` | Re-fetch a previously rendered document by the id a render/export/fill tool returned. |
+| `docgen_render_pdf` | Render HTML, markdown, or a `{{key}}` template + data object to a downloadable PDF |
+| `docgen_export_spreadsheet` | Render one or more named worksheets of row objects to a downloadable `.xlsx` workbook |
+| `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF (base64 or https URL) and optionally flatten it |
+| `docgen_get_document` | Re-fetch a previously rendered document by the id a render/export/fill tool returned |
 
-### `docgen_render_pdf`
+### Resources
 
-Render content to a downloadable PDF.
+| Resource | Description |
+|:---|:---|
+| `docgen://document/{documentId}` | A rendered document by id — raw bytes as a blob plus a JSON metadata block |
 
-- Provide exactly one `source`: `{ html }` (raw HTML you compose — the recommended path), `{ markdown }` (converted to HTML, then rendered), or `{ template, data }` (a `{{key}}` template filled from a data object, with server-owned layout)
-- `pageOptions` control size (`A4` / `Letter` / `Legal` / `A3` / `A5`, default `Letter`), orientation, per-side margins (CSS lengths like `"10mm"`, `"0.5in"`, `"72pt"`), header/footer text (supporting the `{{page}}`, `{{total}}`, `{{date}}` tokens), and automatic page numbers
-- The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS — a `degraded` enrichment flag is set when unsupported styling is dropped, so the agent isn't misled about fidelity
+All document data is also reachable via the tool surface — `docgen_get_document` is the tool-only twin of this resource.
+
+## Capability reference
+
+### `docgen_render_pdf` <sub>tool</sub>
+
+- Provide exactly one `source`: `{ html }` (raw HTML, recommended), `{ markdown }` (converted to HTML), or `{ template, data }` (a `{{key}}` template filled from a data object)
+- `pageOptions` sets `size` (`A4` / `Letter` / `Legal` / `A3` / `A5`, default `Letter`), `orientation` (default `portrait`), per-side `margin` as CSS lengths (`"10mm"`, `"0.5in"`, `"72pt"`), `header`/`footer` text supporting `{{page}}` / `{{total}}` / `{{date}}` tokens, and `pageNumbers`
+- The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS, images, or scripts — sets `degraded: true` in the enrichment when unsupported styling is dropped
 - Returns a `DocumentEnvelope` with `pageCount`
+- Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`
 
 ---
 
-### `docgen_export_spreadsheet`
+### `docgen_export_spreadsheet` <sub>tool</sub>
 
-Render tabular data to an `.xlsx` workbook — the natural export stage for rows pulled from another server.
-
-- Each entry in `sheets[]` is a worksheet `name` plus an array of row objects (property → scalar string / number / boolean / null)
-- An optional per-column spec sets the header label, value `type` (`string` / `number` / `date` / `boolean`), column width, and an Excel number/date format string (e.g. `"#,##0.00"`, `"yyyy-mm-dd"`); when omitted, columns derive from the first row's keys
-- An empty `rows` array yields a header-only sheet; an empty `sheets[]` is rejected (`empty_workbook`)
+- Each entry in `sheets[]` is a worksheet `name` (1–31 chars, unique case-insensitively, no `* ? : \ / [ ]`, no leading/trailing apostrophe) plus a `rows[]` array of property → scalar objects
+- Optional `columns[]` sets header label, value `type` (`string` / `number` / `date` / `boolean`), width, and an Excel number/date format string; omitted columns derive from the first row's keys
+- An empty `rows[]` yields a header-only sheet; an empty `sheets[]` is rejected as `empty_workbook`
 - Returns a `DocumentEnvelope` with `sheetCount`
+- Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`
 
 ---
 
-### `docgen_fill_form`
+### `docgen_fill_form` <sub>tool</sub>
 
-Fill the AcroForm fields of a supplied PDF and optionally flatten it.
-
-- Provide the source as exactly one of `{ base64 }` or `{ url }` — an https URL fetched behind an SSRF guard (private/loopback/link-local ranges blocked, `application/pdf` required, response size capped); base64 avoids the fetch entirely
-- `fields` is an AcroForm field name → value map; names must match the PDF's internal field names exactly (case-sensitive), obtained from whoever supplied the form (docgen does not expose them)
-- Names with no AcroForm counterpart come back in `unmatchedFields[]` rather than failing the call — correct them and re-render
-- Set `flatten: true` to bake the values in so the result is no longer editable
-- AcroForm only — XFA-based PDFs (some government forms) report `not_a_form`
+- Provide the source PDF as exactly one of `{ base64 }` (whitespace and an optional `data:application/pdf;base64,` prefix tolerated) or `{ url }` — an https URL fetched behind an SSRF guard that resolves DNS, blocks private/loopback/link-local destinations, re-validates every redirect hop, and requires `application/pdf`
+- `fields` is an AcroForm field name → value map; names are case-sensitive and must match the PDF's internal field names exactly
+- Names with no AcroForm counterpart come back in `unmatchedFields[]` instead of failing the call
+- `flatten: true` bakes the values in so the result is no longer editable (default `false`)
+- AcroForm only — a flat or XFA-based PDF returns `not_a_form`
 - Returns a `DocumentEnvelope` with `pageCount`, plus `unmatchedFields[]`
 
 ---
 
-### `docgen_get_document`
+### `docgen_get_document` <sub>tool</sub>
 
-Re-fetch a stored document by id.
-
-- The `documentId` is obtainable **only** from an earlier `docgen_render_pdf`, `docgen_export_spreadsheet`, or `docgen_fill_form` result — it is not guessable or constructible
-- Use it to recover a document whose inline copy was dropped (over the inline size limit) while it is still within its TTL
+- `documentId` must match `doc_` followed by 24 url-safe characters — the format returned by `docgen_render_pdf`, `docgen_export_spreadsheet`, or `docgen_fill_form`; not guessable or constructible
+- Pure read — re-fetches the same `DocumentEnvelope`, useful when an earlier response omitted `inlineBase64` (over the inline threshold)
 - An expired or unknown id returns `document_expired`; ids are single-render and not reusable
 
-## Resources
+---
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `docgen://document/{documentId}` | A rendered document by id — the raw bytes as a `blob` (with the document's real mime type) plus a JSON metadata block. Readable until the document TTL expires. |
+### `docgen://document/{documentId}` <sub>resource</sub>
 
-The resource is the stable-URI delivery surface for hosts that support resources. All document data is also reachable via the tool surface — `docgen_get_document` is the tool-only twin of this resource, reading the same store and returning the same envelope. Neither re-renders.
+- `documentId` format: `doc_` followed by 24 url-safe characters, obtained from a docgen render/export/fill tool result
+- Returns two content items: the raw bytes as a `blob` (real mime type — PDF or xlsx) plus a JSON metadata block (`documentId`, `byteSize`, `pageCount`/`sheetCount` when applicable, `createdAt`, `ttlSecondsRemaining`)
+- Reads the same tenant-scoped store as `docgen_get_document` and never re-renders
+- An expired or unknown id returns `document_expired`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 docgen-specific:
 
 - No external API — a bundled rendering stack (`pdf-lib`, `exceljs`, `marked`), so renders are local and deterministic with no upstream to fail
-- One shared `DocumentEnvelope` across all four tools — the three writers and the reader are interchangeable to the agent, and the resource-URI vs. inline-base64 delivery is decided in one place
+- One shared `DocumentEnvelope` across all four tools — the three writers and the reader are interchangeable to the agent, and the resource-URI vs. inline-base64 delivery decision lives in one place
 - Bounded renders — a per-document byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a wall-clock timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed, recoverable error instead of a hang
 - Tenant-scoped, TTL-bounded storage — a document id minted for one tenant resolves only for that tenant; outputs are downloads, not records, so they expire rather than accumulate
 - SSRF-guarded form fetch — `docgen_fill_form` with a URL source resolves DNS and checks the destination IP before fetching, blocking private/loopback/link-local ranges
@@ -222,6 +218,7 @@ All configuration is optional — docgen runs with no required environment varia
 | `DOCGEN_PDF_ENGINE` | PDF rendering engine. Only `lightweight` is implemented; `chromium` is reserved and rejected at startup. | `lightweight` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session posture: `auto`, `stateful`, or `stateless`. docgen declares `stateless` in code, since no tool asks for input mid-handler and documents live in tenant-scoped storage rather than the session store. The env var overrides it when set; the framework's `auto` default resolves to `stateful`. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_PUBLIC_URL` | Public origin behind a TLS proxy. (The `downloadUrl` envelope field is reserved for a future HTTP download route and is not emitted in this version.) | — |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
@@ -287,7 +284,7 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
