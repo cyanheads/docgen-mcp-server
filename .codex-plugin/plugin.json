@@ -1,6 +1,6 @@
 {
   "name": "docgen-mcp-server",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",

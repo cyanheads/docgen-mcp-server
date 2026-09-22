@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/docgen-mcp-server",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "mcpName": "io.github.cyanheads/docgen-mcp-server",
   "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
   "type": "module",

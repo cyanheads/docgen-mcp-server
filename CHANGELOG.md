@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-09-21
+
+Declares stateless session mode by default, fixes HTML entity double-decoding in PDF rendering, and adopts mcp-ts-core 0.13.6.
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-08-21
 
 MCP SDK v2 and mcp-ts-core 0.12.3 adoption, with Bun 1.4/TypeScript 7 tooling, expanded contract coverage, and portable MCPB/Docker packaging.
