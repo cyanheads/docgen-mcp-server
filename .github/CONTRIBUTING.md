@@ -2,9 +2,7 @@
 
 Thanks for using `docgen-mcp-server`. Bugs, feature requests, and documentation gaps all belong in an issue — that's where they get read and picked up.
 
-Open a [bug report](https://github.com/cyanheads/docgen-mcp-server/issues/new?template=bug_report.yml) or [feature request](https://github.com/cyanheads/docgen-mcp-server/issues/new?template=feature_request.yml). Filling in the structured fields is what makes an issue actionable.
-
-Pull requests are welcome. Open an issue first for anything larger than a typo so the approach can be agreed before implementation.
+Open a [bug report](https://github.com/cyanheads/docgen-mcp-server/issues/new?template=bug_report.yml) or [feature request](https://github.com/cyanheads/docgen-mcp-server/issues/new?template=feature_request.yml). Filling in the structured fields is what makes an issue actionable. Anything that fits neither can be a plain issue — a half-formed idea in your own words is fine.
 
 ## Server bug or framework bug?
 
@@ -32,8 +30,8 @@ If you're not sure, file here and it will be routed.
 
 Do the triage first. Read the relevant workflow before filing on a user's behalf:
 
-- [`skills/report-issue-local/SKILL.md`](../skills/report-issue-local/SKILL.md) — this repository.
-- [`skills/report-issue-framework/SKILL.md`](../skills/report-issue-framework/SKILL.md) — `mcp-ts-core` after isolating the bug to the framework.
+- [`framework-skills/report-issue-local/SKILL.md`](../framework-skills/report-issue-local/SKILL.md) — this repository.
+- [`framework-skills/report-issue-framework/SKILL.md`](../framework-skills/report-issue-framework/SKILL.md) — `mcp-ts-core` after isolating the bug to the framework.
 
 ## Security
 
