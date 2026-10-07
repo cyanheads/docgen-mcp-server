@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -46,49 +46,38 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 
 ### `docgen_render_pdf` <sub>tool</sub>
 
-- Provide exactly one `source`: `{ html }` (raw HTML, recommended), `{ markdown }` (converted to HTML), or `{ template, data }` (a `{{key}}` template filled from a data object)
-- `pageOptions` sets `size` (`A4` / `Letter` / `Legal` / `A3` / `A5`, default `Letter`), `orientation` (default `portrait`), per-side `margin` as CSS lengths (`"10mm"`, `"0.5in"`, `"72pt"`), `header`/`footer` text supporting `{{page}}` / `{{total}}` / `{{date}}` tokens, and `pageNumbers`
-- The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS, images, or scripts — sets `degraded: true` in the enrichment when unsupported styling is dropped
-- Returns a `DocumentEnvelope` with `pageCount`
-- Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`
+- Provide exactly one `source`: `{ html }`, `{ markdown }`, or `{ template, data }` for `{{key}}` interpolation. `pageOptions` controls page size/orientation, CSS-length margins, headers/footers (`{{page}}`, `{{total}}`, `{{date}}`) and page numbers.
+- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` signals dropped CSS, images or scripts. The lightweight engine renders headings, paragraphs, lists and tables.
+- Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`.
 
 ---
 
 ### `docgen_export_spreadsheet` <sub>tool</sub>
 
-- Each entry in `sheets[]` is a worksheet `name` (1–31 chars, unique case-insensitively, no `* ? : \ / [ ]`, no leading/trailing apostrophe) plus a `rows[]` array of property → scalar objects
-- Optional `columns[]` sets header label, value `type` (`string` / `number` / `date` / `boolean`), width, and an Excel number/date format string; omitted columns derive from the first row's keys
-- An empty `rows[]` yields a header-only sheet; an empty `sheets[]` is rejected as `empty_workbook`
-- Returns a `DocumentEnvelope` with `sheetCount`
-- Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`
+- Supply at least one sheet with a unique `name` (1–31 characters) and scalar `rows[]`; empty rows yield a header-only sheet. Optional `columns[]` sets headers, type (`string` / `number` / `date` / `boolean`), width and Excel format.
+- Returns a `DocumentEnvelope` with `sheetCount`. Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`.
 
 ---
 
 ### `docgen_fill_form` <sub>tool</sub>
 
-- Provide the source PDF as exactly one of `{ base64 }` (whitespace and an optional `data:application/pdf;base64,` prefix tolerated) or `{ url }` — an https URL fetched behind an SSRF guard that resolves DNS, blocks private/loopback/link-local destinations, re-validates every redirect hop, and requires `application/pdf`
-- `fields` is an AcroForm field name → value map; names are case-sensitive and must match the PDF's internal field names exactly
-- Names with no AcroForm counterpart come back in `unmatchedFields[]` instead of failing the call
-- `flatten: true` bakes the values in so the result is no longer editable (default `false`)
-- AcroForm only — a flat or XFA-based PDF returns `not_a_form`
-- Returns a `DocumentEnvelope` with `pageCount`, plus `unmatchedFields[]`
+- Provide exactly one `sourcePdf`: `{ base64 }` or `{ url }` (public https serving `application/pdf`), plus `fields` mapping exact, case-sensitive AcroForm field names to values. Flat or XFA-only PDFs return `not_a_form`.
+- Returns a `DocumentEnvelope` with `pageCount` and `unmatchedFields[]` for names with no matching field.
+- `flatten: true` makes the filled values non-editable (default `false`).
 
 ---
 
 ### `docgen_get_document` <sub>tool</sub>
 
-- `documentId` must match `doc_` followed by 24 url-safe characters — the format returned by `docgen_render_pdf`, `docgen_export_spreadsheet`, or `docgen_fill_form`; not guessable or constructible
-- Pure read — re-fetches the same `DocumentEnvelope`, useful when an earlier response omitted `inlineBase64` (over the inline threshold)
-- An expired or unknown id returns `document_expired`; ids are single-render and not reusable
+- Supply the `documentId` an earlier render/export/fill returned (`doc_` plus 24 url-safe characters).
+- Re-fetches its `DocumentEnvelope` without rendering again; an expired or unknown id returns `document_expired`.
 
 ---
 
 ### `docgen://document/{documentId}` <sub>resource</sub>
 
-- `documentId` format: `doc_` followed by 24 url-safe characters, obtained from a docgen render/export/fill tool result
-- Returns two content items: the raw bytes as a `blob` (real mime type — PDF or xlsx) plus a JSON metadata block (`documentId`, `byteSize`, `pageCount`/`sheetCount` when applicable, `createdAt`, `ttlSecondsRemaining`)
-- Reads the same tenant-scoped store as `docgen_get_document` and never re-renders
-- An expired or unknown id returns `document_expired`
+- Use the `documentId` from a render/export/fill result (`doc_` plus 24 url-safe characters).
+- Returns a base64 `blob` with the document's MIME type and JSON metadata (`documentId`, `byteSize`, `pageCount`/`sheetCount`, `createdAt`, `ttlSecondsRemaining`). Reads the same store as `docgen_get_document`; expired or unknown ids return `document_expired`.
 
 ## Features
 
@@ -176,7 +165,7 @@ Documents are delivered by the `docgen://document/{id}` resource (and inline bas
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+); development uses Bun v1.4.2.
 
 ### Installation
 
@@ -222,8 +211,11 @@ All configuration is optional — docgen runs with no required environment varia
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_PUBLIC_URL` | Public origin behind a TLS proxy. (The `downloadUrl` envelope field is reserved for a future HTTP download route and is not emitted in this version.) | — |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log failed arguments/results, redacted by key name and capped by `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). Free-form values may retain secrets. | `false` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend for document bytes + metadata. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP URL; traces use `/v1/traces`, metrics use `/v1/metrics`. Signal-specific endpoints override it. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt-in log endpoint, used as-is; the base URL never enables log export. | — |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 

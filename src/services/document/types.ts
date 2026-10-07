@@ -86,8 +86,8 @@ export type DocumentEnvelope = z.infer<typeof DocumentEnvelopeSchema>;
 /**
  * Internal tenant-scoped metadata record persisted between a render/export/fill
  * call and a later docgen_get_document / resource read. Stored under
- * `doc:meta:{documentId}`; the bytes are stored separately under
- * `doc:blob:{documentId}` with the same TTL so the pair expires atomically.
+ * `doc/meta/{documentId}`; the bytes are stored separately under
+ * `doc/blob/{documentId}` with the same TTL.
  */
 export interface StoredDocumentMeta {
   blobKey: string;

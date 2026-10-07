@@ -2,9 +2,9 @@
 
 **Server:** docgen-mcp-server
 **Version:** 0.2.3
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.13`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
 **Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -61,7 +61,7 @@ import { formatEnvelopeLines } from '@/services/document/format-envelope.js';
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 export const getDocumentTool = tool('docgen_get_document', {
-  title: 'docgen-mcp-server', // display identity is the unscoped package name on every surface
+  title: 'Get Document',
   description:
     'Re-fetch a previously rendered document by the id a docgen render/export/fill tool returned.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
@@ -85,11 +85,9 @@ export const getDocumentTool = tool('docgen_get_document', {
   async handler(input, ctx) {
     const store = getDocumentStore();
     const resolved = await store.get(input.documentId, ctx);
-    // Handlers throw; ctx.fail is typed against the declared reasons, recoveryFor mirrors the hint into content[].
+    // The framework fills the declared recovery hint on both error surfaces.
     if (!resolved) {
-      throw ctx.fail('document_expired', `No document found for id ${input.documentId}.`, {
-        ...ctx.recoveryFor('document_expired'),
-      });
+      throw ctx.fail('document_expired', `No document found for id ${input.documentId}.`);
     }
     return { document: store.buildEnvelope(resolved.meta, resolved.bytes, ctx) };
   },
@@ -113,7 +111,7 @@ import { getDocumentStore } from '@/services/document/document-store.js';
 
 export const documentResource = resource('docgen://document/{documentId}', {
   name: 'docgen-document',
-  title: 'docgen-mcp-server',
+  title: 'Rendered Document',
   description: 'Fetch a rendered document by id — raw bytes as a blob plus a JSON metadata block.',
   mimeType: 'application/octet-stream', // per-item mime types are set on the returned content
   params: z.object({
@@ -134,9 +132,7 @@ export const documentResource = resource('docgen://document/{documentId}', {
   async handler(params, ctx) {
     const resolved = await getDocumentStore().get(params.documentId, ctx);
     if (!resolved) {
-      throw ctx.fail('document_expired', `No document found for id ${params.documentId}.`, {
-        ...ctx.recoveryFor('document_expired'),
-      });
+      throw ctx.fail('document_expired', `No document found for id ${params.documentId}.`);
     }
     return resolved;
   },
@@ -239,14 +235,15 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino and `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts JSON-serializable values; reads return their JSON form (a Date reads as its ISO string). |
 | `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
+| `ctx.inputs` | Client-supplied responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to the capabilities the client declared. Consent gates redeem a server-stored record bound to the operation, caller, target and content; see `api-context`. |
+| `ctx.clientCapabilities` | Capabilities declared for this request, or undefined. Decides whether to ask for optional context, never whether to skip consent. |
 | `ctx.enrich` | Success-path agent context — `.notice()`, `.total()`, `.echo()`, `.truncated()`, or a definition-specific object. Reaches `structuredContent` and `content[]` when the definition declares `enrichment`. |
 | `ctx.content` | Non-text success content — `.image(data, mimeType)`, `.audio(data, mimeType)`, or a raw block. Prepended to `content[]`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.recoveryFor(reason)` | Typed lookup of the contract `recovery` for a declared reason. Returns `{ recovery: { hint } }` for known reasons, `{}` otherwise. Spread into `ctx.fail` data to mirror the contract hint into `content[]`. |
-| `ctx.requestId` | Unique request ID. |
+| `ctx.recoveryFor(reason)` | Typed lookup of the contract `recovery` for a declared reason. Returns `{ recovery: { hint } }` for known reasons, `{}` otherwise. Use for direct handler tests or intentional hint overrides; production tool calls fill declared hints automatically. |
+| `ctx.requestId` | Framework-generated request ID carried by log records and error envelopes as `data.requestId`. The client's JSON-RPC id is logged separately as `jsonRpcId`. |
 | `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
 
 ---
@@ -255,7 +252,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, and the linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) and is the single source of truth for the agent's next move. Pass `ctx.recoveryFor('reason')` as the throw data to put it on the wire (`data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim); override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Forwarding it is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. In docgen, `render-service.ts` and `fetch-guard.ts` raise most declared reasons, so those entries carry `thrownBy: 'service'`; only reasons a handler names in a literal `ctx.fail('<reason>'` go unmarked. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)`. Production tool calls fill `data.recovery.hint` from the matching declared reason when the throw has no hint; both `structuredContent` and `content[]` carry it. Explicit hints override the contract. `recovery` is required (≥ 5 words, lint-validated). Tool error envelopes carry `data.requestId`, and tool error text closes with the request id. Resource parameter rejections (`-32602`) preserve `data: { uri }`; generic protocol errors need not carry a request id. Direct handler calls bypass the tool hint fill, so service and resource tests that assert a hint directly retain `ctx.recoveryFor`. Mark service-thrown entries `thrownBy: 'service'` so `error-contract-unthrown` skips them; docgen's render and fetch services use this pattern. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) need no declaration.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -267,7 +264,7 @@ errors: [
 ],
 async handler(input, ctx) {
   const item = await db.find(input.id);
-  if (!item) throw ctx.fail('no_match', `No item ${input.id}`, ctx.recoveryFor('no_match'));
+  if (!item) throw ctx.fail('no_match', `No item ${input.id}`);
   return item;
 }
 ```
@@ -356,7 +353,6 @@ Available skills:
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
-| `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `git-wrapup` | Land working-tree changes as a commit stack — version bump, changelog, verify, commit by concern, release commit on top. No tag, no push to main; opens the release PR when the project declares release PR mode |
 | `release-pr-review` | Review pass on an open release PR — simplifier + correctness review, fixes as ordinary commits on top of the stack, PR body kept in sync. Release PR mode only |
@@ -454,7 +450,7 @@ security: false                            # optional — true ONLY for a source
 
 ## Publishing
 
-**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the changelog entry plus a gates section); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
+**Every release goes through a release PR, straight-through** — `git-wrapup`'s "Release PR mode", mode `straight-through`. One run: `git-wrapup` lands the commit stack on `release/<version>`, pushes it, and opens the PR (title = the release commit subject, body = the release digest: theme line, `## Changes`, `## Gates`, changelog link last); `release-and-publish` then fast-forwards `main` locally with `git merge --ff-only`, creates the tag on `main`'s tip, pushes `main` and the tag, deletes the branch, and publishes. A caller's brief may run a given release as `gated` instead — a `release-pr-review` pass on the open PR before `release-and-publish`. **Never merge through the GitHub UI or `gh pr merge`**: squash and rebase-merge are disabled in the repo settings because both rewrite the stack (rebase-merge also strips the SSH signatures), and a merge commit breaks the linear history.
 
 ---
 
