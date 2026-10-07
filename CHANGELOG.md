@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-10-07
+
+Updates mcp-ts-core to 0.13.13, adopts automatic error recovery hints, and aligns Docker, registry launch metadata, and plugin configuration.
+
 ## [0.2.3](changelog/0.2.x/0.2.3.md) — 2026-09-21
 
 Declares stateless session mode by default, fixes HTML entity double-decoding in PDF rendering, and adopts mcp-ts-core 0.13.6.

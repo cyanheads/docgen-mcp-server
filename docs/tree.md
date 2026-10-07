@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 03:43:26
+Generated on: 2026-10-07 11:18:53
 
 ```text
 docgen-mcp-server/
@@ -128,9 +128,11 @@ docgen-mcp-server/
 │   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
 ├── src/
