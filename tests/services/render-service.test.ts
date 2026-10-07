@@ -415,14 +415,21 @@ describe('RenderService', () => {
     });
 
     it('throws render_timeout when a render exceeds the time budget', async () => {
-      // A 1ms budget cannot serialize a 20k-row workbook in time → render_timeout.
       vi.stubEnv('DOCGEN_RENDER_TIMEOUT_MS', '1');
       resetServerConfig();
       const ctx = createMockContext({ tenantId: 't1' });
-      const rows = Array.from({ length: 20_000 }, (_, i) => ({ a: i, b: `row ${i}`, c: i * 2 }));
-      await expect(svc.renderSpreadsheet([{ name: 'Big', rows }], ctx)).rejects.toMatchObject({
-        data: { reason: 'render_timeout' },
-      });
+      vi.useFakeTimers();
+      try {
+        const render = svc.renderSpreadsheet([{ name: 'Data', rows: [{ a: 1 }] }], ctx);
+        const assertion = expect(render).rejects.toMatchObject({
+          data: { reason: 'render_timeout' },
+        });
+        // Expire the budget while the real workbook serialization is still pending.
+        vi.advanceTimersByTime(1);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
