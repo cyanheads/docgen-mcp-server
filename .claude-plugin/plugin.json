@@ -4,7 +4,7 @@
   "version": "0.2.3",
   "description": "Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.",
   "author": {
-    "name": "Casey Hand",
+    "name": "cyanheads",
     "email": "casey@caseyjhand.com",
     "url": "https://caseyjhand.com"
   },
@@ -17,8 +17,20 @@
       "command": "npx",
       "args": ["-y", "@cyanheads/docgen-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "DOCGEN_DOCUMENT_TTL_SECONDS": "${user_config.document_ttl}",
+        "DOCGEN_MAX_DOCUMENT_BYTES": "${user_config.max_bytes}",
+        "DOCGEN_RENDER_TIMEOUT_MS": "${user_config.render_timeout}",
+        "DOCGEN_INLINE_MAX_BYTES": "${user_config.inline_bytes}",
+        "DOCGEN_PDF_ENGINE": "${user_config.pdf_engine}"
       }
     }
+  },
+  "userConfig": {
+    "document_ttl": { "type": "string", "title": "Document TTL (seconds)", "description": "How long rendered documents remain retrievable.", "default": "900" },
+    "max_bytes": { "type": "string", "title": "Max document size (bytes)", "description": "Hard ceiling on each rendered document.", "default": "26214400" },
+    "render_timeout": { "type": "string", "title": "Render timeout (ms)", "description": "Per-render time budget.", "default": "30000" },
+    "inline_bytes": { "type": "string", "title": "Inline size limit (bytes)", "description": "Documents above this size use resource delivery.", "default": "5242880" },
+    "pdf_engine": { "type": "string", "title": "PDF engine", "description": "Only lightweight is implemented.", "default": "lightweight" }
   }
 }

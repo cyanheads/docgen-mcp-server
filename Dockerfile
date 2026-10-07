@@ -5,8 +5,7 @@
 # source code into JavaScript, and prepares the production assets.
 #
 # Pinned to $BUILDPLATFORM rather than the target platform: `bun run build` emits
-# JavaScript, and only `dist/` crosses into the production stage, which runs its
-# own target-arch install. Built for the target instead, the non-native leg of a
+# JavaScript, and only `dist/` crosses into the production stage. Built for the target instead, the non-native leg of a
 # `--platform linux/amd64,linux/arm64` build runs under QEMU, where bun >= 1.4
 # aborts with a JavaScriptCore allocator assertion and fails the multi-arch push.
 #
@@ -14,7 +13,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
 
@@ -34,13 +33,47 @@ RUN bun run build
 
 
 # ==============================================================================
-# Production Stage
+# Production Dependencies Stage
 #
-# This stage creates a minimal, optimized, and secure image for running the
-# application. It uses a slim base image and only includes production
-# dependencies and build artifacts.
+# Run the scanner, OTel installer and musl pruning on the build architecture.
+# Cross-install the production tree for the runtime's target OS and architecture.
+# Only node_modules leaves this stage.
 # ==============================================================================
-FROM oven/bun:1.4.0-slim AS production
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS deps
+
+WORKDIR /usr/src/app
+
+COPY package.json bun.lock bunfig.toml ./
+COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner ./node_modules/@socketsecurity/bun-security-scanner
+
+ARG TARGETOS
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) echo x64 ;; \
+      arm64) echo arm64 ;; \
+      *) echo "Unsupported TARGETARCH '$TARGETARCH': expected amd64 or arm64" >&2; exit 1 ;; \
+    esac > .bun-cpu
+
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --production --omit=peer --frozen-lockfile --ignore-scripts \
+      --os="$TARGETOS" --cpu="$(cat .bun-cpu)"
+
+COPY scripts/install-otel.ts ./scripts/
+ARG OTEL_ENABLED=true
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    if [ "$OTEL_ENABLED" = "true" ]; then \
+      bun scripts/install-otel.ts --os="$TARGETOS" --cpu="$(cat .bun-cpu)"; \
+    fi
+
+COPY scripts/prune-musl-packages.ts ./scripts/
+RUN bun scripts/prune-musl-packages.ts
+RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
+
+
+# ==============================================================================
+# Production Stage — no build-time JavaScript or dependency installs
+# ==============================================================================
+FROM oven/bun:1.4.2-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -56,33 +89,9 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/docgen-mcp-server"
 
-# Copy dependency manifests
-COPY package.json bun.lock ./
-
-# Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
-# that are not needed in the final production image. `--omit=peer` drops the
-# framework's optional peer tiers; this server declares every runtime import
-# directly, so no required dependency is lost.
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --production --omit=peer --frozen-lockfile --ignore-scripts
-
-# Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
-# Installed by default. Omit them for a leaner image at build time
-# with: docker build --build-arg OTEL_ENABLED=false
-ARG OTEL_ENABLED=true
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    if [ "$OTEL_ENABLED" = "true" ]; then \
-      bun add --omit=dev --omit=peer --ignore-scripts @hono/otel \
-        @opentelemetry/instrumentation-http \
-        @opentelemetry/exporter-metrics-otlp-http \
-        @opentelemetry/exporter-trace-otlp-http \
-        @opentelemetry/instrumentation-pino \
-        @opentelemetry/resources \
-        @opentelemetry/sdk-metrics \
-        @opentelemetry/sdk-node \
-        @opentelemetry/sdk-trace-node \
-        @opentelemetry/semantic-conventions; \
-    fi
+# Keep the original application manifest; the deps stage's OTel install rewrites its copy.
+COPY package.json ./
+COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
@@ -114,7 +123,6 @@ ENV MCP_TRANSPORT_TYPE="http"
 ENV MCP_SESSION_MODE="stateless"
 ENV MCP_LOG_LEVEL="info"
 ENV LOGS_DIR="/var/log/docgen-mcp-server"
-ENV MCP_FORCE_CONSOLE_LOGGING="true"
 
 # Expose the port the server listens on
 EXPOSE ${MCP_HTTP_PORT}
