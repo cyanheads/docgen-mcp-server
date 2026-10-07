@@ -64,7 +64,7 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
 
   async handler(input, ctx) {
     if (input.sheets.length === 0) {
-      throw ctx.fail('empty_workbook', undefined, { ...ctx.recoveryFor('empty_workbook') });
+      throw ctx.fail('empty_workbook');
     }
     const result = await getRenderService().renderSpreadsheet(input.sheets, ctx);
     const document = await getDocumentStore().put(result, ctx);

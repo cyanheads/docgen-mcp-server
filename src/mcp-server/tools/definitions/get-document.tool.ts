@@ -46,9 +46,7 @@ export const getDocumentTool = tool('docgen_get_document', {
     const store = getDocumentStore();
     const resolved = await store.get(input.documentId, ctx);
     if (!resolved) {
-      throw ctx.fail('document_expired', `No document found for id ${input.documentId}.`, {
-        ...ctx.recoveryFor('document_expired'),
-      });
+      throw ctx.fail('document_expired', `No document found for id ${input.documentId}.`);
     }
     const document = store.buildEnvelope(resolved.meta, resolved.bytes, ctx);
     return { document };

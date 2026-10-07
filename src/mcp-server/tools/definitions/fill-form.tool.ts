@@ -103,9 +103,7 @@ export const fillFormTool = tool('docgen_fill_form', {
     const hasBase64 = sourcePdf.base64 !== undefined && sourcePdf.base64 !== '';
     const hasUrl = sourcePdf.url !== undefined && sourcePdf.url !== '';
     if (hasBase64 === hasUrl) {
-      throw ctx.fail('invalid_source', 'Provide exactly one PDF source: base64 or url.', {
-        ...ctx.recoveryFor('invalid_source'),
-      });
+      throw ctx.fail('invalid_source', 'Provide exactly one PDF source: base64 or url.');
     }
 
     const render = getRenderService();
@@ -113,15 +111,13 @@ export const fillFormTool = tool('docgen_fill_form', {
     if (sourcePdf.base64 !== undefined && sourcePdf.base64 !== '') {
       const decoded = decodeBase64Pdf(sourcePdf.base64);
       if (!decoded) {
-        throw ctx.fail('invalid_pdf_source', undefined, {
-          ...ctx.recoveryFor('invalid_pdf_source'),
-        });
+        throw ctx.fail('invalid_pdf_source');
       }
       sourceBytes = decoded;
     } else {
       // SSRF guard + size cap live inside fetchSourcePdf; it throws source_unfetchable.
       if (sourcePdf.url === undefined || sourcePdf.url === '') {
-        throw ctx.fail('invalid_source', undefined, { ...ctx.recoveryFor('invalid_source') });
+        throw ctx.fail('invalid_source');
       }
       sourceBytes = await render.fetchSourcePdf(sourcePdf.url, ctx);
     }

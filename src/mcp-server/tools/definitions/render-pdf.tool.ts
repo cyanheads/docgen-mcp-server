@@ -81,19 +81,15 @@ export const renderPdfTool = tool('docgen_render_pdf', {
         present === 0
           ? 'No source provided. Supply exactly one of html, markdown, or template+data.'
           : 'Multiple sources provided. Supply exactly one of html, markdown, or template+data.',
-        { ...ctx.recoveryFor('invalid_source') },
       );
     }
     if (source.template !== undefined && source.data === undefined) {
-      throw ctx.fail('invalid_source', 'The template source requires a data object.', {
-        ...ctx.recoveryFor('invalid_source'),
-      });
+      throw ctx.fail('invalid_source', 'The template source requires a data object.');
     }
     if (source.data !== undefined && source.template === undefined) {
       throw ctx.fail(
         'invalid_source',
         'The data object is only used with a template source; html and markdown ignore it. Provide { template, data }, or remove data.',
-        { ...ctx.recoveryFor('invalid_source') },
       );
     }
 
