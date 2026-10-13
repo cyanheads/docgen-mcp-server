@@ -7,6 +7,9 @@
  * @module tests/tools/document-tools
  */
 
+import { EventEmitter } from 'node:events';
+import { request } from 'node:https';
+import { Readable } from 'node:stream';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import ExcelJS from 'exceljs';
@@ -17,9 +20,34 @@ import { documentResource } from '@/mcp-server/resources/definitions/document.re
 import { exportSpreadsheetTool } from '@/mcp-server/tools/definitions/export-spreadsheet.tool.js';
 import { fillFormTool } from '@/mcp-server/tools/definitions/fill-form.tool.js';
 import { getDocumentTool } from '@/mcp-server/tools/definitions/get-document.tool.js';
+import { listFormFieldsTool } from '@/mcp-server/tools/definitions/list-form-fields.tool.js';
 import { renderPdfTool } from '@/mcp-server/tools/definitions/render-pdf.tool.js';
 import { initDocumentStore } from '@/services/document/document-store.js';
 import { initRenderService } from '@/services/document/render-service.js';
+
+vi.mock('node:https', () => ({ request: vi.fn() }));
+
+/** Supplies a real readable body at the outbound HTTPS boundary. */
+function respondWith(body: Uint8Array, contentType: string): void {
+  vi.mocked(request).mockImplementationOnce(((
+    _url: URL,
+    _options: unknown,
+    callback: (response: unknown) => void,
+  ) => {
+    const req = new EventEmitter();
+    Object.assign(req, {
+      end() {
+        callback(
+          Object.assign(Readable.from([body]), {
+            statusCode: 200,
+            headers: { 'content-type': contentType },
+          }),
+        );
+      },
+    });
+    return req;
+  }) as typeof request);
+}
 
 const PDF_MAGIC = '%PDF-';
 const XLSX_MAGIC = [0x50, 0x4b, 0x03, 0x04];
@@ -41,12 +69,21 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   resetServerConfig();
 });
 
 describe('docgen_render_pdf', () => {
+  it('discloses character substitution through tool enrichment', async () => {
+    const ctx = createMockContext({ errors: renderPdfTool.errors });
+    await renderPdfTool.handler(
+      renderPdfTool.input.parse({ source: { markdown: '你好' }, pageOptions: { header: '你好' } }),
+      ctx,
+    );
+    expect(getEnrichment(ctx).degraded).toBe(true);
+  });
   it('returns an envelope whose inline base64 decodes to a valid PDF', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
     const input = renderPdfTool.input.parse({
@@ -90,7 +127,7 @@ describe('docgen_render_pdf', () => {
     const ctx = createMockContext({ tenantId: 't1', errors: renderPdfTool.errors });
     const input = renderPdfTool.input.parse({ source: { template: '<p>{{x}}</p>' } });
     await expect(renderPdfTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_source' },
     });
   });
@@ -101,7 +138,7 @@ describe('docgen_render_pdf', () => {
       source: { html: '<p>html wins</p>', data: { unexpected: 'ignored' } },
     });
     await expect(renderPdfTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_source' },
     });
   });
@@ -171,6 +208,57 @@ describe('docgen_render_pdf', () => {
   });
 });
 
+describe('docgen_list_form_fields', () => {
+  it('returns and formats complete field metadata without storage', async () => {
+    const pdf = await PDFDocument.create();
+    const page = pdf.addPage();
+    const field = pdf.getForm().createDropdown('applicant.region');
+    field.addOptions(['west', 'east']);
+    field.enableRequired();
+    field.addToPage(page);
+    const ctx = createMockContext({ errors: listFormFieldsTool.errors });
+    const set = vi.spyOn(ctx.state, 'set');
+    const result = await listFormFieldsTool.handler(
+      { sourcePdf: { base64: Buffer.from(await pdf.save()).toString('base64') } },
+      ctx,
+    );
+    expect(result).toEqual({
+      fields: [
+        { name: 'applicant.region', type: 'dropdown', required: true, options: ['west', 'east'] },
+      ],
+    });
+    expect(JSON.parse((listFormFieldsTool.format!(result)[0] as { text: string }).text)).toEqual(
+      result,
+    );
+    expect(set).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {},
+    { base64: '', url: '' },
+    { base64: 'JVBERi0=', url: 'https://example.com/form.pdf' },
+  ])('rejects invalid source pairs %j', async (sourcePdf) => {
+    await expect(
+      listFormFieldsTool.handler(
+        { sourcePdf },
+        createMockContext({ errors: listFormFieldsTool.errors }),
+      ),
+    ).rejects.toMatchObject({ code: -32007, data: { reason: 'invalid_source' } });
+  });
+
+  it('rejects a blocked URL through the guard without storing an inspection artifact', async () => {
+    const ctx = createMockContext({ errors: listFormFieldsTool.errors });
+    const set = vi.spyOn(ctx.state, 'set');
+    await expect(
+      listFormFieldsTool.handler({ sourcePdf: { url: 'https://127.0.0.1/form.pdf' } }, ctx),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'source_unfetchable' },
+    });
+    expect(set).not.toHaveBeenCalled();
+  });
+});
+
 describe('docgen_export_spreadsheet', () => {
   it('returns an envelope whose inline base64 decodes to a valid xlsx', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: exportSpreadsheetTool.errors });
@@ -213,7 +301,7 @@ describe('docgen_export_spreadsheet', () => {
       sheets: [{ name: 'Bad:Name', rows: [{ a: 1 }] }],
     });
     await expect(exportSpreadsheetTool.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       data: { reason: 'invalid_sheet_name' },
     });
   });
@@ -313,12 +401,10 @@ describe('docgen_fill_form', () => {
     });
   });
 
-  it('fills a form fetched from a URL behind the SSRF guard (stubbed fetch)', async () => {
+  it('fills a form fetched from a URL through the guarded HTTPS boundary', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: fillFormTool.errors });
     const formBytes = new Uint8Array(Buffer.from(await makeFormBase64(), 'base64'));
-    const headers = new Headers({ 'content-type': 'application/pdf' });
-    // Literal public-IP host → guard takes the isIP path, no DNS; fetch is stubbed.
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(formBytes, { headers })));
+    respondWith(formBytes, 'application/pdf');
     const input = fillFormTool.input.parse({
       sourcePdf: { url: 'https://93.184.216.34/form.pdf' },
       fields: { name: 'Fetched' },
@@ -333,8 +419,7 @@ describe('docgen_fill_form', () => {
 
   it('throws source_unfetchable through the handler when the URL serves non-PDF', async () => {
     const ctx = createMockContext({ tenantId: 't1', errors: fillFormTool.errors });
-    const headers = new Headers({ 'content-type': 'text/html' });
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<html/>', { headers })));
+    respondWith(new Uint8Array(Buffer.from('<html/>')), 'text/html');
     const input = fillFormTool.input.parse({
       sourcePdf: { url: 'https://93.184.216.34/not-a.pdf' },
       fields: { name: 'X' },

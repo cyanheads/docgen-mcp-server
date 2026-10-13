@@ -10,6 +10,7 @@ import { documentResource } from '@/mcp-server/resources/definitions/document.re
 import { exportSpreadsheetTool } from '@/mcp-server/tools/definitions/export-spreadsheet.tool.js';
 import { fillFormTool } from '@/mcp-server/tools/definitions/fill-form.tool.js';
 import { getDocumentTool } from '@/mcp-server/tools/definitions/get-document.tool.js';
+import { listFormFieldsTool } from '@/mcp-server/tools/definitions/list-form-fields.tool.js';
 import { renderPdfTool } from '@/mcp-server/tools/definitions/render-pdf.tool.js';
 import { initDocumentStore } from '@/services/document/document-store.js';
 import { initRenderService } from '@/services/document/render-service.js';
@@ -18,6 +19,7 @@ const allErrors = [
   ...(renderPdfTool.errors ?? []),
   ...(exportSpreadsheetTool.errors ?? []),
   ...(fillFormTool.errors ?? []),
+  ...(listFormFieldsTool.errors ?? []),
   ...(getDocumentTool.errors ?? []),
   ...(documentResource.errors ?? []),
 ] as const;
@@ -28,7 +30,41 @@ beforeEach(() => {
 });
 
 describe('definition smoke test', () => {
-  it('executes all four tools and the document resource', async () => {
+  it('exposes the all-row column rule and preserves machine names', () => {
+    const columns = exportSpreadsheetTool.input.shape.sheets.element.shape.columns;
+    expect(columns.description).toContain('union of all row keys in first-seen order');
+    expect([
+      renderPdfTool.name,
+      exportSpreadsheetTool.name,
+      fillFormTool.name,
+      getDocumentTool.name,
+      listFormFieldsTool.name,
+      documentResource.name,
+    ]).toEqual([
+      'docgen_render_pdf',
+      'docgen_export_spreadsheet',
+      'docgen_fill_form',
+      'docgen_get_document',
+      'docgen_list_form_fields',
+      'docgen-document',
+    ]);
+  });
+  it('publishes distinct capability titles', () => {
+    expect([
+      renderPdfTool.title,
+      exportSpreadsheetTool.title,
+      fillFormTool.title,
+      getDocumentTool.title,
+      documentResource.title,
+    ]).toEqual([
+      'Render PDF',
+      'Export Spreadsheet',
+      'Fill PDF Form',
+      'Get Document',
+      'Rendered Document',
+    ]);
+  });
+  it('executes all five tools and the document resource', async () => {
     const ctx = createMockContext({ tenantId: 'smoke', errors: allErrors });
 
     const rendered = await renderPdfTool.handler(
@@ -57,6 +93,12 @@ describe('definition smoke test', () => {
       }),
       ctx,
     );
+    const inventory = await listFormFieldsTool.handler(
+      { sourcePdf: { base64: Buffer.from(await source.save()).toString('base64') } },
+      ctx,
+    );
+    expect(inventory.fields).toEqual([{ name: 'status', type: 'text', required: false }]);
+    expect(listFormFieldsTool.title).toBe('List PDF Form Fields');
 
     const fetched = await getDocumentTool.handler(
       getDocumentTool.input.parse({ documentId: rendered.document.documentId }),

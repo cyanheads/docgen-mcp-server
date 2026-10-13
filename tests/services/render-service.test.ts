@@ -8,7 +8,14 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import ExcelJS from 'exceljs';
-import { PDFDocument } from 'pdf-lib';
+import {
+  decodePDFRawStream,
+  PDFArray,
+  PDFDocument,
+  PDFHexString,
+  PDFName,
+  PDFRawStream,
+} from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import { RenderService } from '@/services/document/render-service.js';
@@ -26,6 +33,24 @@ function excelBuffer(bytes: Uint8Array): Parameters<ExcelJS.Workbook['xlsx']['lo
 /** Decodes the leading ASCII bytes of a buffer for magic-byte assertions. */
 function leadingAscii(bytes: Uint8Array, n: number): string {
   return Buffer.from(bytes.slice(0, n)).toString('latin1');
+}
+
+/** Reads the actual text-show operators emitted by the WinAnsi renderer. */
+async function renderedText(bytes: Uint8Array): Promise<string[]> {
+  const pdf = await PDFDocument.load(bytes);
+  return pdf.getPages().flatMap((page) => {
+    const contents = page.node.Contents();
+    if (!contents) throw new Error('Expected a page content stream.');
+    const references = contents instanceof PDFArray ? contents.asArray() : [contents];
+    return references.flatMap((reference) => {
+      const stream = pdf.context.lookup(reference);
+      if (!(stream instanceof PDFRawStream)) throw new Error('Expected a raw PDF content stream.');
+      const operators = Buffer.from(decodePDFRawStream(stream).decode()).toString('latin1');
+      return [...operators.matchAll(/<([0-9A-F]+)> Tj/g)].map((match) =>
+        Buffer.from(match[1]!, 'hex').toString('latin1'),
+      );
+    });
+  });
 }
 
 const defaultPage = PageOptionsSchema.parse({});
@@ -300,6 +325,62 @@ describe('RenderService', () => {
   });
 
   describe('fillForm', () => {
+    it('inventories every field class and nested names without changing bytes', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage([400, 400]);
+      const form = pdf.getForm();
+      const text = form.createTextField('applicant.contact.name');
+      text.enableRequired();
+      text.addToPage(page);
+      form.createCheckBox('agree').addToPage(page);
+      const dropdown = form.createDropdown('choice');
+      dropdown.addOptions(['red', 'blue']);
+      dropdown.enableRequired();
+      dropdown.addToPage(page);
+      const options = form.createOptionList('list');
+      options.addOptions(['alpha', 'beta']);
+      options.addToPage(page);
+      const radio = form.createRadioGroup('radio');
+      radio.addOptionToPage('yes', page);
+      radio.addOptionToPage('no', page);
+      form.createButton('button').addToPage('Submit', page);
+      const signature = pdf.context.obj({
+        FT: PDFName.of('Sig'),
+        T: PDFHexString.fromText('signature'),
+        Ff: 2,
+      });
+      form.acroForm.addField(pdf.context.register(signature));
+      const source = new Uint8Array(await pdf.save());
+      const original = source.slice();
+      const ctx = createMockContext();
+      const set = vi.spyOn(ctx.state, 'set');
+      const fields = await svc.listFormFields(source, ctx);
+      expect(fields).toEqual([
+        { name: 'applicant.contact.name', type: 'text', required: true },
+        { name: 'agree', type: 'checkbox', required: false },
+        { name: 'choice', type: 'dropdown', required: true, options: ['red', 'blue'] },
+        { name: 'list', type: 'optionList', required: false, options: ['alpha', 'beta'] },
+        { name: 'radio', type: 'radioGroup', required: false, options: ['yes', 'no'] },
+        { name: 'button', type: 'button', required: false },
+        { name: 'signature', type: 'signature', required: true },
+      ]);
+      expect(source).toEqual(original);
+      expect(set).not.toHaveBeenCalled();
+    });
+
+    it('rejects malformed and zero-field PDF inventory', async () => {
+      const plain = await PDFDocument.create();
+      plain.addPage();
+      for (const [bytes, reason] of [
+        [new Uint8Array([1, 2]), 'invalid_pdf_source'],
+        [new Uint8Array(await plain.save()), 'not_a_form'],
+      ] as const) {
+        await expect(svc.listFormFields(bytes, createMockContext())).rejects.toMatchObject({
+          code: -32007,
+          data: { reason },
+        });
+      }
+    });
     it('fills AcroForm fields and returns a valid PDF', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
       const source = await makeFormPdf();
@@ -434,6 +515,110 @@ describe('RenderService', () => {
   });
 
   describe('spreadsheet cell coercion and sparsity', () => {
+    it('parses recognized boolean strings and preserves unknown strings', async () => {
+      const values = [
+        'false',
+        '0',
+        'no',
+        'off',
+        '',
+        ' FALSE ',
+        'No',
+        'true',
+        '1',
+        'yes',
+        'on',
+        ' ON ',
+        'unknown',
+        true,
+        false,
+        0,
+        1,
+        -2,
+        null,
+      ];
+      const expected = [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        true,
+        true,
+        true,
+        true,
+        true,
+        'unknown',
+        true,
+        false,
+        false,
+        true,
+        true,
+        null,
+      ];
+      const result = await svc.renderSpreadsheet(
+        [
+          {
+            name: 'Booleans',
+            rows: values.map((b) => ({ b })),
+            columns: [{ key: 'b', header: 'B', type: 'boolean' }],
+          },
+        ],
+        createMockContext(),
+      );
+      const ws = await firstSheet(result.bytes);
+      expect(values.map((_, i) => ws.getRow(i + 2).getCell(1).value)).toEqual(expected);
+    });
+
+    it('keeps blank numeric input blank and numeric dates as decimal text', async () => {
+      const result = await svc.renderSpreadsheet(
+        [
+          {
+            name: 'Scalars',
+            rows: [
+              { n: '', d: 2024 },
+              { n: '  ', d: '2026-01-15' },
+              { n: '42.5', d: null },
+            ],
+            columns: [
+              { key: 'n', header: 'N', type: 'number' },
+              { key: 'd', header: 'D', type: 'date' },
+            ],
+          },
+        ],
+        createMockContext(),
+      );
+      const ws = await firstSheet(result.bytes);
+      expect(ws.getRow(2).getCell(1).value).toBeNull();
+      expect(ws.getRow(3).getCell(1).value).toBeNull();
+      expect(ws.getRow(2).getCell(2).value).toBe('2024');
+      expect(ws.getRow(3).getCell(2).value).toEqual(new Date('2026-01-15T00:00:00.000Z'));
+      expect(ws.getRow(4).getCell(1).value).toBe(42.5);
+    });
+
+    it('derives the all-row key union in first-seen order', async () => {
+      const result = await svc.renderSpreadsheet(
+        [{ name: 'Union', rows: [{ z: 1 }, { a: 2, z: 3 }, { b: 4 }] }],
+        createMockContext(),
+      );
+      const ws = await firstSheet(result.bytes);
+      expect(ws.getRow(1).values).toEqual([undefined, 'z', 'a', 'b']);
+      expect(ws.getRow(3).values).toEqual([undefined, 3, 2]);
+      expect(ws.getRow(4).getCell(3).value).toBe(4);
+    });
+
+    it('preserves existing punctuation and Latin-1 without degradation', async () => {
+      const result = await svc.renderPdf(
+        { markdown: '“café” — … • déjà' },
+        defaultPage,
+        createMockContext(),
+      );
+      expect(result.degraded).toBe(false);
+      expect(await renderedText(result.bytes)).toEqual(['"café" - ... * déjà']);
+    });
+
     /** Loads the first worksheet of a rendered workbook for cell assertions. */
     async function firstSheet(bytes: Uint8Array): Promise<ExcelJS.Worksheet> {
       const wb = new ExcelJS.Workbook();
@@ -548,6 +733,34 @@ describe('RenderService', () => {
   });
 
   describe('PDF layout edge cases', () => {
+    it.each([
+      { html: '<p>你好</p>' },
+      { html: '<p>€</p>' },
+      { html: '<p>\u0080</p>' },
+      { html: '<ul><li>你好</li></ul>' },
+      { html: '<table><tr><th>你好</th></tr><tr><td>你好</td></tr></table>' },
+    ])('discloses substitution on body surfaces: %j', async (source) => {
+      const result = await svc.renderPdf(source, defaultPage, createMockContext());
+      expect(result.degraded).toBe(true);
+      const replacement = source.html.includes('你好') ? '??' : '?';
+      const count = source.html.includes('<table>') ? 2 : 1;
+      expect(
+        (await renderedText(result.bytes)).filter((text) => text === replacement),
+      ).toHaveLength(count);
+    });
+
+    it.each(['header', 'footer'])(
+      'safely substitutes unsupported %s characters',
+      async (surface) => {
+        const result = await svc.renderPdf(
+          { markdown: 'ASCII' },
+          PageOptionsSchema.parse({ [surface]: '你好 {{page}}' }),
+          createMockContext(),
+        );
+        expect(result.degraded).toBe(true);
+        expect(await renderedText(result.bytes)).toEqual(['ASCII', '?? 1']);
+      },
+    );
     /** Parses partial page options against the schema (applying defaults). */
     function defaultPageWith(over: Record<string, unknown>) {
       return PageOptionsSchema.parse(over);

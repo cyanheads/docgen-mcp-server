@@ -15,7 +15,7 @@ import { SheetSchema } from '@/services/document/render-types.js';
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
-  title: 'docgen-mcp-server',
+  title: 'Export Spreadsheet',
   description:
     'Render one or more named worksheets of row objects to a downloadable .xlsx workbook. Each sheet is a name plus an array of row objects (property → scalar), with an optional column spec controlling header label, value type, width, and number/date format. An empty rows array yields a header-only sheet; provide at least one sheet. Returns a delivery envelope with a documentId, resource URI, sheetCount, byte size, and inline base64 when small enough. The natural export stage for tabular data pulled from another server — reshape its rows into sheets[] and render.',
   annotations: { readOnlyHint: false, openWorldHint: false },
@@ -33,13 +33,13 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
   errors: [
     {
       reason: 'empty_workbook',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The sheets array was empty — no worksheets to render.',
       recovery: 'Provide at least one sheet with a name and a rows array (rows may be empty).',
     },
     {
       reason: 'invalid_sheet_name',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'A worksheet name is blank, over 31 characters, contains * ? : \\ / [ ], begins or ends with an apostrophe, or duplicates another sheet name (case-insensitive).',
       recovery:
         'Rename the sheet to a unique 1–31 character label without * ? : \\ / [ ] and with no leading or trailing apostrophe.',
@@ -47,7 +47,7 @@ export const exportSpreadsheetTool = tool('docgen_export_spreadsheet', {
     },
     {
       reason: 'document_too_large',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The rendered workbook exceeded the configured maximum document size.',
       recovery:
         'Reduce the number of rows or sheets and render again, or split into multiple workbooks.',

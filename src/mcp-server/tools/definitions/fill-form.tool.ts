@@ -13,26 +13,13 @@ import { getDocumentStore } from '@/services/document/document-store.js';
 import { formatEnvelopeLines } from '@/services/document/format-envelope.js';
 import { getRenderService } from '@/services/document/render-service.js';
 import { FormFieldsSchema, SourcePdfSchema } from '@/services/document/render-types.js';
+import { resolveSourcePdf } from '@/services/document/source-pdf.js';
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
-/** Decodes a base64 string to bytes, returning null when it is not valid base64. */
-function decodeBase64Pdf(b64: string): Uint8Array | null {
-  // Strip ASCII whitespace before validating — base64 from CLIs, MIME encoders, and
-  // copy/paste is routinely line-wrapped — then drop an optional data-URI prefix.
-  const cleaned = b64.replace(/[ \t\n\r\f\v]+/g, '').replace(/^data:application\/pdf;base64,/, '');
-  if (cleaned.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(cleaned)) return null;
-  try {
-    const bytes = new Uint8Array(Buffer.from(cleaned, 'base64'));
-    return bytes.byteLength > 0 ? bytes : null;
-  } catch {
-    return null;
-  }
-}
-
 export const fillFormTool = tool('docgen_fill_form', {
-  title: 'docgen-mcp-server',
+  title: 'Fill PDF Form',
   description:
-    'Fill the AcroForm fields of a supplied PDF and optionally flatten it. Provide the source PDF as exactly one of { base64 } or { url } (an https URL fetched behind an SSRF guard; base64 avoids any fetch), plus a fields map of AcroForm field name → value. Field names must match the PDF internal names exactly (case-sensitive); obtain them from whoever supplied the form, since docgen does not expose them. Names with no AcroForm counterpart come back in unmatchedFields[] rather than failing — correct them and re-render. Set flatten to bake the values in so the result is no longer editable. Returns a delivery envelope with a documentId, resource URI, pageCount, and inline base64 when small enough.',
+    'Fill the AcroForm fields of a supplied PDF and optionally flatten it. Provide the source PDF as exactly one of { base64 } or { url } (a public https URL serving application/pdf; base64 avoids any fetch), plus a fields map of AcroForm field name → value. Obtain exact case-sensitive names and choice options with docgen_list_form_fields. Signatures and buttons are discovery only. Names with no AcroForm counterpart come back in unmatchedFields[] rather than failing — correct them and re-render. Set flatten to bake the values in so the result is no longer editable. Returns a delivery envelope with a documentId, resource URI, pageCount, and inline base64 when small enough.',
   annotations: { readOnlyHint: false, openWorldHint: false },
   input: z.object({
     sourcePdf: SourcePdfSchema,
@@ -55,7 +42,7 @@ export const fillFormTool = tool('docgen_fill_form', {
   errors: [
     {
       reason: 'not_a_form',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The source PDF has no AcroForm fields to fill (a flat or XFA-only PDF).',
       recovery:
         'Confirm the PDF is a fillable AcroForm; a flat or XFA-only PDF cannot be filled here.',
@@ -63,7 +50,7 @@ export const fillFormTool = tool('docgen_fill_form', {
     },
     {
       reason: 'invalid_pdf_source',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'sourcePdf.base64 was provided but is not a valid base64-encoded PDF.',
       recovery:
         'Re-encode the PDF as base64 and verify the content starts with JVBERi (the base64 prefix for %PDF-).',
@@ -78,13 +65,14 @@ export const fillFormTool = tool('docgen_fill_form', {
     },
     {
       reason: 'invalid_source',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'Neither base64 nor url was provided for sourcePdf, or both were.',
       recovery: 'Provide exactly one source: { base64 } or { url }.',
+      thrownBy: 'service',
     },
     {
       reason: 'document_too_large',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The filled PDF exceeded the configured maximum document size.',
       recovery: 'Use a smaller source PDF and render again.',
       thrownBy: 'service',
@@ -99,29 +87,8 @@ export const fillFormTool = tool('docgen_fill_form', {
   ],
 
   async handler(input, ctx) {
-    const { sourcePdf } = input;
-    const hasBase64 = sourcePdf.base64 !== undefined && sourcePdf.base64 !== '';
-    const hasUrl = sourcePdf.url !== undefined && sourcePdf.url !== '';
-    if (hasBase64 === hasUrl) {
-      throw ctx.fail('invalid_source', 'Provide exactly one PDF source: base64 or url.');
-    }
-
     const render = getRenderService();
-    let sourceBytes: Uint8Array;
-    if (sourcePdf.base64 !== undefined && sourcePdf.base64 !== '') {
-      const decoded = decodeBase64Pdf(sourcePdf.base64);
-      if (!decoded) {
-        throw ctx.fail('invalid_pdf_source');
-      }
-      sourceBytes = decoded;
-    } else {
-      // SSRF guard + size cap live inside fetchSourcePdf; it throws source_unfetchable.
-      if (sourcePdf.url === undefined || sourcePdf.url === '') {
-        throw ctx.fail('invalid_source');
-      }
-      sourceBytes = await render.fetchSourcePdf(sourcePdf.url, ctx);
-    }
-
+    const sourceBytes = await resolveSourcePdf(input.sourcePdf, ctx);
     const result = await render.fillForm(sourceBytes, input.fields, input.flatten, ctx);
     const document = await getDocumentStore().put(result, ctx);
     if (result.unmatchedFields.length > 0) {

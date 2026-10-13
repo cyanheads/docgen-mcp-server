@@ -1,5 +1,5 @@
 /**
- * @fileoverview Shared markdown formatter for the DocumentEnvelope. All four tools
+ * @fileoverview Shared markdown formatter for the DocumentEnvelope. All four delivery tools
  * return the same envelope shape, so they render it identically — every envelope
  * field appears in the content[] text (satisfying format-parity and giving
  * content[]-only clients the full delivery payload, including the inline base64

@@ -2,11 +2,13 @@
  * @fileoverview SSRF guard tests — the isBlockedIp classifier (private, loopback,
  * link-local, metadata, IPv6 cases), the fetchPdfGuarded scheme/host gate, and the
  * response-validation surface (content-type, status, byte cap, redirect handling)
- * exercised against a stubbed global fetch so no real network is contacted.
+ * exercised through a stubbed HTTPS boundary so no real network is contacted.
  * @module tests/services/fetch-guard
  */
 
 import { lookup } from 'node:dns/promises';
+import { EventEmitter } from 'node:events';
+import { request } from 'node:https';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -24,6 +26,46 @@ const LEAK_KEYS = [
 ] as const;
 
 vi.mock('node:dns/promises', () => ({ lookup: vi.fn() }));
+vi.mock('node:https', () => ({ request: vi.fn() }));
+
+beforeEach(() => {
+  vi.mocked(request).mockImplementation(((
+    url: URL,
+    options: { signal: AbortSignal },
+    callback: (response: unknown) => void,
+  ) => {
+    const req = new EventEmitter();
+    Object.assign(req, {
+      end() {
+        void fetch(url.toString(), options).then(
+          (response) =>
+            callback({
+              statusCode: response.status,
+              headers: Object.fromEntries(response.headers),
+              destroy() {
+                void response.body?.cancel().catch(() => {});
+              },
+              async *[Symbol.asyncIterator]() {
+                const reader = response.body?.getReader();
+                if (!reader) return;
+                try {
+                  for (;;) {
+                    const next = await reader.read();
+                    if (next.done) return;
+                    yield next.value;
+                  }
+                } finally {
+                  reader.releaseLock();
+                }
+              },
+            }),
+          (error) => req.emit('error', error),
+        );
+      },
+    });
+    return req;
+  }) as typeof request);
+});
 
 const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]); // %PDF-
 
@@ -57,6 +99,12 @@ function redirectResponse(location: string | null, status = 302): Response {
 }
 
 describe('isBlockedIp', () => {
+  it.each(['0:0:0:0:0:0:0:1', '0:0:0:0:0:0:0:0', '::ffff:7f00:1', 'fe90::1', 'febf::1'])(
+    'normalizes blocked address %s',
+    (address) => {
+      expect(isBlockedIp(address)).toBe(true);
+    },
+  );
   it('blocks RFC 1918 private ranges', () => {
     expect(isBlockedIp('10.0.0.1')).toBe(true);
     expect(isBlockedIp('172.16.5.4')).toBe(true);
@@ -105,6 +153,25 @@ describe('isBlockedIp', () => {
 });
 
 describe('fetchPdfGuarded', () => {
+  it('does not launch a request when already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchMock = vi.fn().mockResolvedValue(pdfResponse());
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      await expect(
+        fetchPdfGuarded(
+          'https://93.184.216.34/form.pdf',
+          1000,
+          1000,
+          createMockContext({ signal: controller.signal }),
+        ),
+      ).rejects.toMatchObject({ data: { reason: 'source_unfetchable' } });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
   it('rejects non-https schemes with source_unfetchable', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
     await expect(
@@ -367,13 +434,58 @@ describe('fetchPdfGuarded DNS resolution (mocked lookup)', () => {
     vi.clearAllMocks();
   });
 
-  it('fetches when the hostname resolves to a public address', async () => {
+  it('returns bytes from the vetted address when a later DNS answer changes', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
-    lookupMock.mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }] as never);
-    fetchMock.mockResolvedValueOnce(pdfResponse(PDF_BYTES));
-    await expect(
-      fetchPdfGuarded('https://example.com/form.pdf', 1_000_000, 5000, ctx),
-    ).resolves.toBeDefined();
+    lookupMock
+      .mockResolvedValueOnce([{ address: '93.184.216.34', family: 4 }] as never)
+      .mockResolvedValue([{ address: '10.0.0.5', family: 4 }] as never);
+    const destinations: string[] = [];
+    vi.mocked(request).mockImplementation(((
+      url: URL,
+      options: import('node:https').RequestOptions,
+      callback: (response: unknown) => void,
+    ) => {
+      const req = new EventEmitter();
+      Object.assign(req, {
+        end() {
+          const connected = (_error: unknown, address: string | { address: string }[]) => {
+            const destination = typeof address === 'string' ? address : address[0]?.address;
+            if (!destination) throw new Error('Expected a connection destination.');
+            destinations.push(destination);
+            callback({
+              statusCode: 200,
+              headers: { 'content-type': 'application/pdf' },
+              destroy() {},
+              async *[Symbol.asyncIterator]() {
+                yield destination === '93.184.216.34' ? PDF_BYTES : new Uint8Array([0]);
+              },
+            });
+          };
+          if (options.lookup) options.lookup(url.hostname, {}, connected);
+          else void lookup(url.hostname, { all: true }).then((answers) => connected(null, answers));
+        },
+      });
+      return req;
+    }) as typeof request);
+    const bytes = await fetchPdfGuarded('https://example.com/form.pdf', 1_000_000, 5000, ctx);
+    expect(bytes).toEqual(PDF_BYTES);
+    expect(destinations).toEqual(['93.184.216.34']);
+  });
+
+  it('cancels stalled DNS within the deadline without launching HTTPS', async () => {
+    vi.useFakeTimers();
+    lookupMock.mockReturnValue(new Promise(() => {}));
+    const count = vi.mocked(request).mock.calls.length;
+    try {
+      const pending = expect(
+        fetchPdfGuarded('https://example.com/form.pdf', 1000, 10, createMockContext()),
+      ).rejects.toMatchObject({ data: { reason: 'source_unfetchable' } });
+      await vi.advanceTimersByTimeAsync(10);
+      await pending;
+      expect(vi.mocked(request).mock.calls.length).toBe(count);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('blocks when ANY resolved address is private (round-robin DNS)', async () => {

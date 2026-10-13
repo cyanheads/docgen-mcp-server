@@ -15,9 +15,9 @@ import { PageOptionsSchema, PdfSourceSchema } from '@/services/document/render-t
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 export const renderPdfTool = tool('docgen_render_pdf', {
-  title: 'docgen-mcp-server',
+  title: 'Render PDF',
   description:
-    'Render content to a downloadable PDF document. Provide exactly one source: { html } (raw HTML you compose — the recommended path), { markdown } (converted to HTML then rendered), or { template, data } (a {{key}} template filled from a data object, server-owned layout). Control page size, orientation, margins, header/footer, and page numbers via pageOptions. Returns a delivery envelope with a documentId, resource URI, pageCount, byte size, and inline base64 when small enough. The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS — a degraded flag is set when unsupported styling is dropped.',
+    'Render content to a downloadable PDF document. Provide exactly one source: { html } (raw HTML you compose — the recommended path), { markdown } (converted to HTML then rendered), or { template, data } (a {{key}} template filled from a data object, server-owned layout). Control page size, orientation, margins, header/footer, and page numbers via pageOptions. Returns a delivery envelope with a documentId, resource URI, pageCount, byte size, and inline base64 when small enough. The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS. The degraded flag discloses dropped styling or character replacement with ? on any text surface, including headers and footers; smart-punctuation transliteration alone does not set it.',
   annotations: { readOnlyHint: false, openWorldHint: false },
   input: z.object({
     source: PdfSourceSchema,
@@ -33,20 +33,20 @@ export const renderPdfTool = tool('docgen_render_pdf', {
     degraded: z
       .boolean()
       .describe(
-        'True when the lightweight engine dropped unsupported styling (CSS, images, scripts).',
+        'True when the lightweight engine dropped unsupported styling (CSS, images, scripts) or replaced characters with ? in body text, tables, headers or footers. Smart-punctuation transliteration alone does not set this flag.',
       ),
   },
   errors: [
     {
       reason: 'invalid_source',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'None of html / markdown / template+data was provided, more than one source form was, a template was given without data, or data was given without a template.',
       recovery:
         'Provide exactly one source: { html }, { markdown }, or { template, data } — not zero and not several. data pairs only with template.',
     },
     {
       reason: 'template_render_failed',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The template referenced a data key absent from the data object, or was malformed.',
       recovery:
         "Check the template's {{referenced}} fields against the keys present in the data object.",
@@ -54,7 +54,7 @@ export const renderPdfTool = tool('docgen_render_pdf', {
     },
     {
       reason: 'document_too_large',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The rendered PDF exceeded the configured maximum document size.',
       recovery: 'Reduce the content (fewer pages, smaller images) and render again.',
       thrownBy: 'service',

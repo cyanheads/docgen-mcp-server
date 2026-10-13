@@ -21,7 +21,7 @@ interface DocumentResourceData {
 
 export const documentResource = resource('docgen://document/{documentId}', {
   name: 'docgen-document',
-  title: 'docgen-mcp-server',
+  title: 'Rendered Document',
   description:
     'Fetch a rendered document by id. Returns the raw bytes as a blob (with the document mime type) plus a JSON metadata block. The id comes from a docgen render/export/fill tool result; readable until the document TTL expires, then document_expired.',
   // Per-item mime types are set on the returned content; this is the registration default.

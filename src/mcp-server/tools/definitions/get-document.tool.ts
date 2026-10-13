@@ -14,7 +14,7 @@ import { formatEnvelopeLines } from '@/services/document/format-envelope.js';
 import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 
 export const getDocumentTool = tool('docgen_get_document', {
-  title: 'docgen-mcp-server',
+  title: 'Get Document',
   description:
     'Re-fetch a previously rendered document by the id a docgen render/export/fill tool returned. Returns the same delivery envelope (metadata plus resource URI, and inline base64 when small enough). Use it to recover a document whose inline copy was dropped (over the inline size limit) while it is still within its TTL. The documentId is obtainable ONLY from an earlier docgen_render_pdf, docgen_export_spreadsheet, or docgen_fill_form result — it is not guessable, and an expired or unknown id returns document_expired.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },

@@ -1,8 +1,9 @@
 /**
- * @fileoverview SSRF-guarded PDF fetcher for the `docgen_fill_form` URL source.
+ * @fileoverview SSRF-guarded PDF fetcher shared by the two PDF form tools.
  * Enforces https-only, blocks private/loopback/link-local/cloud-metadata
  * destinations by resolving DNS and checking the resolved IP (not just the
- * hostname), follows redirects up to a fixed limit while re-validating each hop,
+ * hostname), binds a fresh HTTPS connection to a vetted address with TLS identity
+ * preserved, and follows redirects while re-validating each hop,
  * verifies `application/pdf`, and caps the response body at the configured byte
  * ceiling before buffering. Every failure path — including a raw network
  * rejection or a status-mapped framework `McpError` whose `data` carries upstream
@@ -13,6 +14,8 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import type { IncomingMessage } from 'node:http';
+import { type RequestOptions, request } from 'node:https';
 import { isIP } from 'node:net';
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
@@ -89,15 +92,19 @@ export function isBlockedIp(ip: string): boolean {
   }
 
   if (family === 6) {
-    const lower = ip.toLowerCase().replace(/^\[|\]$/g, '');
+    if (ip.includes('%')) return true;
+    const lower = new URL(`https://[${ip}]/`).hostname.slice(1, -1);
     if (lower === '::1' || lower === '::') return true; // loopback / unspecified
-    if (lower.startsWith('fe80')) return true; // link-local
+    if (/^fe[89ab]/.test(lower)) return true; // link-local /10
     if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique-local
     if (lower.startsWith('ff')) return true; // multicast
     // IPv4-mapped (::ffff:a.b.c.d) — re-check the embedded v4 address.
-    const mapped = lower.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-    const embeddedIpv4 = mapped?.[1];
-    if (embeddedIpv4) return isBlockedIp(embeddedIpv4);
+    const mapped = lower.match(/^::ffff:([\da-f]+):([\da-f]+)$/);
+    if (mapped) {
+      const n =
+        Number.parseInt(mapped[1] as string, 16) * 65536 + Number.parseInt(mapped[2] as string, 16);
+      return isBlockedIp([n >>> 24, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'));
+    }
     return false;
   }
 
@@ -109,7 +116,11 @@ export function isBlockedIp(ip: string): boolean {
  * if ANY resolved address is blocked (defends against round-robin DNS where one
  * record is public and another private). A literal IP host is checked directly.
  */
-async function assertHostAllowed(hostname: string, ctx: Context): Promise<void> {
+async function assertHostAllowed(
+  hostname: string,
+  ctx: Context,
+  signal: AbortSignal,
+): Promise<{ address: string; family: number }> {
   const fail = (detail: string) =>
     serviceUnavailable(`Refusing to fetch ${hostname}: ${detail}`, {
       reason: FETCH_REASON,
@@ -118,19 +129,58 @@ async function assertHostAllowed(hostname: string, ctx: Context): Promise<void> 
 
   if (isIP(hostname)) {
     if (isBlockedIp(hostname)) throw fail('destination IP is private, loopback, or link-local');
-    return;
+    return { address: hostname, family: isIP(hostname) };
   }
 
-  let addresses: { address: string }[];
+  let addresses: { address: string; family: number }[];
+  let onAbort: (() => void) | undefined;
   try {
-    addresses = await lookup(hostname, { all: true });
+    addresses = await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      }),
+    ]);
   } catch {
+    signal.throwIfAborted();
     throw fail('DNS resolution failed');
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-  if (addresses.length === 0) throw fail('DNS resolved to no addresses');
+  const [approved] = addresses;
+  if (!approved) throw fail('DNS resolved to no addresses');
   for (const { address } of addresses) {
     if (isBlockedIp(address)) throw fail('resolves to a private, loopback, or link-local address');
   }
+  return approved;
+}
+
+/**
+ * Opens a fresh HTTPS connection to a vetted address while preserving URL TLS
+ * identity and Host. Exposed for socket-level transport tests, not tool callers.
+ * @internal
+ */
+export function requestPdfAtAddress(
+  url: URL,
+  approved: { address: string; family: number },
+  signal: AbortSignal,
+): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    signal.throwIfAborted();
+    const options: RequestOptions & { autoSelectFamily: boolean } = {
+      method: 'GET',
+      agent: false,
+      signal,
+      autoSelectFamily: false,
+      headers: { Accept: 'application/pdf' },
+      lookup: (_hostname, _options, callback) => callback(null, approved.address, approved.family),
+    };
+    const req = request(url, options, resolve);
+    req.once('error', reject);
+    req.end();
+  });
 }
 
 /**
@@ -139,7 +189,7 @@ async function assertHostAllowed(hostname: string, ctx: Context): Promise<void> 
  * scheme, blocked destination, non-2xx status, wrong content-type, oversized
  * body, or too many redirects. Manual redirect following re-runs the full guard
  * on every hop. Honors `ctx.signal` and the configured render timeout via an
- * AbortController. A raw `fetch` rejection or a status-mapped framework `McpError`
+ * AbortController. A raw network rejection or a status-mapped framework `McpError`
  * is caught and normalized to the same leak-free `source_unfetchable` error.
  */
 export async function fetchPdfGuarded(
@@ -164,6 +214,10 @@ export async function fetchPdfGuarded(
   }, timeoutMs);
 
   try {
+    if (ctx.signal.aborted) {
+      controller.abort();
+      controller.signal.throwIfAborted();
+    }
     let currentUrl = rawUrl;
 
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -175,42 +229,42 @@ export async function fetchPdfGuarded(
       }
       if (parsed.protocol !== 'https:') throw fail('only https URLs are allowed');
 
-      await assertHostAllowed(parsed.hostname, ctx);
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+      const approved = await assertHostAllowed(hostname, ctx, controller.signal);
+      controller.signal.throwIfAborted();
+      const response = await requestPdfAtAddress(parsed, approved, controller.signal);
+      try {
+        // Follow redirects manually so each hop is re-validated by the guard.
+        const status = response.statusCode ?? 0;
+        if (status >= 300 && status < 400) {
+          const location = response.headers.location;
+          if (!location) throw fail(`redirect ${status} had no Location header`);
+          if (hop === MAX_REDIRECTS) throw fail('too many redirects');
+          currentUrl = new URL(location, parsed).toString();
+          continue;
+        }
 
-      const response = await fetch(parsed.toString(), {
-        method: 'GET',
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: { Accept: 'application/pdf' },
-      });
+        if (status < 200 || status >= 300) throw fail(`the server returned HTTP ${status}`);
 
-      // Follow redirects manually so each hop is re-validated by the guard.
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get('location');
-        if (!location) throw fail(`redirect ${response.status} had no Location header`);
-        if (hop === MAX_REDIRECTS) throw fail('too many redirects');
-        currentUrl = new URL(location, parsed).toString();
-        continue;
+        const contentType = response.headers['content-type'] ?? '';
+        if (!/^application\/pdf\b/i.test(contentType)) {
+          throw fail(`expected application/pdf but got "${contentType || 'no content-type'}"`);
+        }
+
+        const declaredLength = Number(response.headers['content-length']);
+        if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
+          throw fail(`the response is ${declaredLength} bytes, over the ${maxBytes}-byte limit`);
+        }
+
+        const bytes = await readBodyCapped(response, maxBytes, fail);
+        ctx.log.info('Fetched source PDF', {
+          host: parsed.hostname,
+          byteSize: bytes.byteLength,
+        });
+        return bytes;
+      } finally {
+        response.destroy();
       }
-
-      if (!response.ok) throw fail(`the server returned HTTP ${response.status}`);
-
-      const contentType = response.headers.get('content-type') ?? '';
-      if (!/^application\/pdf\b/i.test(contentType)) {
-        throw fail(`expected application/pdf but got "${contentType || 'no content-type'}"`);
-      }
-
-      const declaredLength = Number(response.headers.get('content-length'));
-      if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
-        throw fail(`the response is ${declaredLength} bytes, over the ${maxBytes}-byte limit`);
-      }
-
-      const bytes = await readBodyCapped(response, maxBytes, fail);
-      ctx.log.info('Fetched source PDF for form fill', {
-        host: parsed.hostname,
-        byteSize: bytes.byteLength,
-      });
-      return bytes;
     }
 
     throw fail('too many redirects');
@@ -250,30 +304,19 @@ export async function fetchPdfGuarded(
  * before the whole body is buffered.
  */
 async function readBodyCapped(
-  response: Response,
+  response: IncomingMessage,
   maxBytes: number,
   fail: (detail: string) => Error,
 ): Promise<Uint8Array> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const buf = new Uint8Array(await response.arrayBuffer());
-    if (buf.byteLength > maxBytes) throw fail(`the response exceeds the ${maxBytes}-byte limit`);
-    return buf;
-  }
-
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      total += value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw fail(`the response exceeds the ${maxBytes}-byte limit`);
-      }
-      chunks.push(value);
+  for await (const value of response) {
+    total += value.byteLength;
+    if (total > maxBytes) {
+      response.destroy();
+      throw fail(`the response exceeds the ${maxBytes}-byte limit`);
     }
+    chunks.push(value);
   }
 
   const out = new Uint8Array(total);

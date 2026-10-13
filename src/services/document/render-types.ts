@@ -92,7 +92,9 @@ export const ColumnSpecSchema = z
     type: z
       .enum(['string', 'number', 'date', 'boolean'])
       .default('string')
-      .describe('Cell value type. `date` expects ISO 8601 string row values.'),
+      .describe(
+        'Cell value type. `date` parses ISO 8601 strings; numeric dates remain decimal text. Blank numeric strings become blank cells. Boolean strings are trimmed and case-insensitive: true/1/yes/on and false/0/no/off/empty; unknown strings remain text.',
+      ),
     width: z.number().positive().optional().describe('Column width in character units.'),
     format: z
       .string()
@@ -118,7 +120,7 @@ export const SheetSchema = z
       .array(ColumnSpecSchema)
       .optional()
       .describe(
-        'Optional ordered column spec. When omitted, columns derive from the first row keys.',
+        'Optional ordered column spec. When omitted, columns derive from the union of all row keys in first-seen order.',
       ),
   })
   .describe('One named worksheet of tabular rows.');

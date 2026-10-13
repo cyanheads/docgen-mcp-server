@@ -8,9 +8,22 @@
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
-import { invalidParams, timeout } from '@cyanheads/mcp-ts-core/errors';
+import { timeout, validationError } from '@cyanheads/mcp-ts-core/errors';
 import ExcelJS from 'exceljs';
-import { PDFDocument, type PDFFont, type PDFPage, rgb, StandardFonts } from 'pdf-lib';
+import {
+  PDFButton,
+  PDFCheckBox,
+  PDFDocument,
+  PDFDropdown,
+  type PDFFont,
+  PDFOptionList,
+  type PDFPage,
+  PDFRadioGroup,
+  PDFSignature,
+  PDFTextField,
+  rgb,
+  StandardFonts,
+} from 'pdf-lib';
 import { getServerConfig } from '@/config/server-config.js';
 import { fetchPdfGuarded } from './fetch-guard.js';
 import { type BlockDocument, htmlToBlocks, markdownToBlocks } from './html-blocks.js';
@@ -51,11 +64,61 @@ export interface FillFormResult extends RenderResult {
   unmatchedFields: string[];
 }
 
+/** Read-only inventory entry; choice fields alone expose options. */
+export interface FormFieldInfo {
+  name: string;
+  options?: string[];
+  required: boolean;
+  type: 'text' | 'checkbox' | 'dropdown' | 'optionList' | 'radioGroup' | 'signature' | 'button';
+}
+
 export class RenderService {
+  /** Lists every supported AcroForm field without saving or storing the PDF. */
+  listFormFields(sourceBytes: Uint8Array, ctx: Context): Promise<FormFieldInfo[]> {
+    return this.withTimeout(getServerConfig().renderTimeoutMs, ctx, async () => {
+      const pdf = await this.loadFormPdf(sourceBytes, ctx);
+      return pdf
+        .getForm()
+        .getFields()
+        .map((field) => {
+          const base = { name: field.getName(), required: field.isRequired() };
+          if (field instanceof PDFTextField) return { ...base, type: 'text' };
+          if (field instanceof PDFCheckBox) return { ...base, type: 'checkbox' };
+          if (field instanceof PDFDropdown)
+            return { ...base, type: 'dropdown', options: field.getOptions() };
+          if (field instanceof PDFOptionList)
+            return { ...base, type: 'optionList', options: field.getOptions() };
+          if (field instanceof PDFRadioGroup)
+            return { ...base, type: 'radioGroup', options: field.getOptions() };
+          if (field instanceof PDFSignature) return { ...base, type: 'signature' };
+          if (field instanceof PDFButton) return { ...base, type: 'button' };
+          throw new Error(`Unsupported AcroForm field class: ${field.constructor.name}`);
+        });
+    });
+  }
+
+  /** Loads a PDF and enforces the shared AcroForm-source rejection contract. */
+  private async loadFormPdf(sourceBytes: Uint8Array, ctx: Context): Promise<PDFDocument> {
+    let pdf: PDFDocument;
+    try {
+      pdf = await PDFDocument.load(sourceBytes);
+    } catch {
+      throw validationError('The source bytes are not a valid PDF document.', {
+        reason: 'invalid_pdf_source',
+        ...ctx.recoveryFor('invalid_pdf_source'),
+      });
+    }
+    if (pdf.getForm().getFields().length === 0)
+      throw validationError('The source PDF has no fillable AcroForm fields.', {
+        reason: 'not_a_form',
+        ...ctx.recoveryFor('not_a_form'),
+      });
+    return pdf;
+  }
   /**
    * Renders the PDF source (one of html / markdown / template+data) to a PDF
    * document. Returns the bytes, page count, and a `degraded` flag set when the
-   * lightweight engine dropped unsupported styling. Validation of which source
+   * lightweight engine dropped unsupported styling or replaced text characters. Validation of which source
    * key is present happens in the handler; this method trusts a resolved source.
    */
   renderPdf(source: PdfSource, pageOptions: PageOptions, ctx: Context): Promise<PdfRenderOutput> {
@@ -133,24 +196,9 @@ export class RenderService {
   ): Promise<FillFormResult> {
     const { renderTimeoutMs } = getServerConfig();
     return this.withTimeout(renderTimeoutMs, ctx, async () => {
-      let pdfDoc: PDFDocument;
-      try {
-        pdfDoc = await PDFDocument.load(sourceBytes);
-      } catch {
-        throw invalidParams('The source bytes are not a valid PDF document.', {
-          reason: 'invalid_pdf_source',
-          ...ctx.recoveryFor('invalid_pdf_source'),
-        });
-      }
-
+      const pdfDoc = await this.loadFormPdf(sourceBytes, ctx);
       const form = pdfDoc.getForm();
       const formFields = form.getFields();
-      if (formFields.length === 0) {
-        throw invalidParams('The source PDF has no fillable AcroForm fields.', {
-          reason: 'not_a_form',
-          ...ctx.recoveryFor('not_a_form'),
-        });
-      }
 
       const available = new Set(formFields.map((f) => f.getName()));
       const unmatchedFields: string[] = [];
@@ -184,7 +232,7 @@ export class RenderService {
   }
 
   /**
-   * Fetches a source PDF for form fill from a caller URL behind the SSRF guard.
+   * Fetches a source PDF for either form tool from a caller URL behind the SSRF guard.
    * Exposed on the service so the handler keeps a single code path; the byte cap
    * and timeout are enforced inside the guard.
    */
@@ -223,7 +271,7 @@ export class RenderService {
         }
       }
       if (value === undefined || value === null) {
-        throw invalidParams(
+        throw validationError(
           `Template references "${path}" but it is missing from the data object.`,
           {
             reason: 'template_render_failed',
@@ -245,6 +293,12 @@ export class RenderService {
     const pdf = await PDFDocument.create();
     const font = await pdf.embedFont(StandardFonts.Helvetica);
     const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    let degraded = doc.degraded;
+    const supported = new Set(font.getCharacterSet());
+    const safeText = (text: string): string =>
+      sanitizeForFont(text, supported, () => {
+        degraded = true;
+      });
 
     const [pw, ph] = PAGE_SIZES[opts.size];
     const [pageW, pageH] = opts.orientation === 'landscape' ? [ph, pw] : [pw, ph];
@@ -273,7 +327,8 @@ export class RenderService {
     const drawWrapped = (text: string, size: number, useFont: PDFFont, indent = 0): void => {
       const maxW = contentW - indent;
       for (const para of text.split('\n')) {
-        const lines = wrapText(para, useFont, size, maxW);
+        const safe = safeText(para);
+        const lines = wrapText(safe, useFont, size, maxW);
         const lineHeight = size * 1.35;
         for (const line of lines) {
           ensure(lineHeight);
@@ -320,7 +375,7 @@ export class RenderService {
           const cellFont = block.header ? bold : font;
           const cols = block.cells.length || 1;
           const colW = contentW / cols;
-          const rowLines = block.cells.map((c) => wrapText(c, cellFont, 10, colW - 8));
+          const rowLines = block.cells.map((c) => wrapText(safeText(c), cellFont, 10, colW - 8));
           const rowHeight = Math.max(1, ...rowLines.map((l) => l.length)) * (10 * 1.3) + 4;
           ensure(rowHeight);
           const rowTop = y;
@@ -378,7 +433,7 @@ export class RenderService {
           (_m, k: 'page' | 'total' | 'date') => tokens[k],
         );
       if (opts.header) {
-        p.drawText(interp(opts.header), {
+        p.drawText(safeText(interp(opts.header)), {
           x: mLeft,
           y: pageH - mTop + 6,
           size: 9,
@@ -392,7 +447,7 @@ export class RenderService {
           ? `Page ${i + 1} of ${total}`
           : undefined;
       if (footerText) {
-        p.drawText(footerText, {
+        p.drawText(safeText(footerText), {
           x: mLeft,
           y: mBottom - 12,
           size: 9,
@@ -407,7 +462,7 @@ export class RenderService {
       bytes: new Uint8Array(buffer),
       mimeType: PDF_MIME,
       pageCount: total,
-      degraded: doc.degraded,
+      degraded,
     };
   }
 
@@ -422,7 +477,7 @@ export class RenderService {
     for (const { name } of sheets) {
       const problem = describeSheetNameProblem(name, seen);
       if (problem) {
-        throw invalidParams(`Invalid worksheet name: ${problem}`, {
+        throw validationError(`Invalid worksheet name: ${problem}`, {
           reason: 'invalid_sheet_name',
           ...ctx.recoveryFor('invalid_sheet_name'),
         });
@@ -452,14 +507,22 @@ export class RenderService {
   private coerceCell(value: string | number | boolean | null, type: string): ExcelJS.CellValue {
     if (value === null) return null;
     if (type === 'date') {
-      const d = typeof value === 'string' || typeof value === 'number' ? new Date(value) : null;
+      const d = typeof value === 'string' ? new Date(value) : null;
       return d && !Number.isNaN(d.getTime()) ? d : String(value);
     }
     if (type === 'number') {
+      if (typeof value === 'string' && value.trim() === '') return null;
       const n = typeof value === 'number' ? value : Number(value);
       return Number.isNaN(n) ? value : n;
     }
-    if (type === 'boolean') return Boolean(value);
+    if (type === 'boolean') {
+      if (typeof value === 'boolean') return value;
+      if (typeof value === 'number') return value !== 0;
+      const normalized = value.trim().toLowerCase();
+      if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
+      if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+      return value;
+    }
     return value;
   }
 
@@ -498,7 +561,7 @@ export class RenderService {
   private assertWithinByteCeiling(byteSize: number, ctx: Context): void {
     const { maxDocumentBytes } = getServerConfig();
     if (byteSize > maxDocumentBytes) {
-      throw invalidParams(
+      throw validationError(
         `Rendered artifact is ${byteSize} bytes, over the ${maxDocumentBytes}-byte limit.`,
         { reason: 'document_too_large', ...ctx.recoveryFor('document_too_large') },
       );
@@ -534,8 +597,7 @@ export class RenderService {
 /** Greedy word-wrap of a single paragraph to a max width in points. */
 function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
   if (!text) return [''];
-  const safe = sanitizeForFont(text);
-  const words = safe.split(/\s+/).filter(Boolean);
+  const words = text.split(/\s+/).filter(Boolean);
   if (words.length === 0) return [''];
   const lines: string[] = [];
   let current = '';
@@ -579,7 +641,7 @@ function hardBreak(word: string, font: PDFFont, size: number, maxWidth: number):
  * drawText never throws on exotic Unicode. Keeps the lightweight engine robust
  * against arbitrary caller content.
  */
-function sanitizeForFont(text: string): string {
+function sanitizeForFont(text: string, supported: Set<number>, onReplacement: () => void): string {
   let out = '';
   for (const ch of text) {
     const cp = ch.codePointAt(0);
@@ -606,7 +668,12 @@ function sanitizeForFont(text: string): string {
       default:
         // Keep printable Latin-1 (U+0020..U+00FF); drop everything else so
         // pdf-lib's WinAnsi StandardFonts never throw on exotic Unicode.
-        out += cp >= 0x20 && cp <= 0xff ? ch : '?';
+        if (cp >= 0x20 && cp <= 0xff && supported.has(cp)) out += ch;
+        else if (/\s/u.test(ch)) out += ' ';
+        else {
+          out += '?';
+          onReplacement();
+        }
     }
   }
   return out;

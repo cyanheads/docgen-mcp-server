@@ -14,6 +14,7 @@ import { documentResource } from './mcp-server/resources/definitions/document.re
 import { exportSpreadsheetTool } from './mcp-server/tools/definitions/export-spreadsheet.tool.js';
 import { fillFormTool } from './mcp-server/tools/definitions/fill-form.tool.js';
 import { getDocumentTool } from './mcp-server/tools/definitions/get-document.tool.js';
+import { listFormFieldsTool } from './mcp-server/tools/definitions/list-form-fields.tool.js';
 import { renderPdfTool } from './mcp-server/tools/definitions/render-pdf.tool.js';
 import { initDocumentStore } from './services/document/document-store.js';
 import { initRenderService } from './services/document/render-service.js';
@@ -22,10 +23,10 @@ await createApp({
   name: 'docgen-mcp-server',
   title: 'docgen-mcp-server',
   sessionMode: 'stateless',
-  tools: [renderPdfTool, exportSpreadsheetTool, fillFormTool, getDocumentTool],
+  tools: [renderPdfTool, exportSpreadsheetTool, fillFormTool, listFormFieldsTool, getDocumentTool],
   resources: [documentResource],
   instructions:
-    'Render structured content into downloadable documents: docgen_render_pdf (HTML/markdown/template → PDF), docgen_export_spreadsheet (named row sheets → xlsx), docgen_fill_form (fill an AcroForm PDF). Each returns a documentId; re-fetch within the TTL via docgen_get_document or the docgen://document/{id} resource. Small documents are returned inline as base64; otherwise fetch the bytes via the resource.',
+    'Render structured content into downloadable documents: docgen_render_pdf (HTML/markdown/template → PDF), docgen_export_spreadsheet (named row sheets → xlsx), docgen_fill_form (fill an AcroForm PDF). Discover exact form names and choice options first with docgen_list_form_fields; inspection does not change or store the PDF. The three render/export/fill tools return a documentId; re-fetch within the TTL via docgen_get_document or the docgen://document/{id} resource. Small documents are returned inline as base64; otherwise fetch the bytes via the resource.',
   setup() {
     // Fail fast on malformed DOCGEN_* config (or an unimplemented engine) at startup.
     getServerConfig();
