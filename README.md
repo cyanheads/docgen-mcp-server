@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/docgen-mcp-server</h1>
   <p><b>Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.</b>
-  <div>4 Tools • 1 Resource</div>
+  <div>5 Tools • 1 Resource</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -32,6 +32,7 @@ Document rendering built on a bundled stack — pdf-lib for PDF and AcroForm fil
 | `docgen_render_pdf` | Render HTML, markdown, or a `{{key}}` template + data object to a downloadable PDF |
 | `docgen_export_spreadsheet` | Render one or more named worksheets of row objects to a downloadable `.xlsx` workbook |
 | `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF (base64 or https URL) and optionally flatten it |
+| `docgen_list_form_fields` | Inspect exact AcroForm field names, types, required flags and choice options without changing the PDF |
 | `docgen_get_document` | Re-fetch a previously rendered document by the id a render/export/fill tool returned |
 
 ### Resources
@@ -47,7 +48,7 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 ### `docgen_render_pdf` <sub>tool</sub>
 
 - Provide exactly one `source`: `{ html }`, `{ markdown }`, or `{ template, data }` for `{{key}}` interpolation. `pageOptions` controls page size/orientation, CSS-length margins, headers/footers (`{{page}}`, `{{total}}`, `{{date}}`) and page numbers.
-- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` signals dropped CSS, images or scripts. The lightweight engine renders headings, paragraphs, lists and tables.
+- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` signals dropped CSS, images or scripts, or character replacement with `?` on body text, tables, headers or footers. Supported Latin-1 and existing smart-punctuation transliteration remain non-degraded. The lightweight engine renders headings, paragraphs, lists and tables.
 - Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`.
 
 ---
@@ -55,6 +56,7 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 ### `docgen_export_spreadsheet` <sub>tool</sub>
 
 - Supply at least one sheet with a unique `name` (1–31 characters) and scalar `rows[]`; empty rows yield a header-only sheet. Optional `columns[]` sets headers, type (`string` / `number` / `date` / `boolean`), width and Excel format.
+- Omitted columns use all row keys in first-seen order. Boolean strings are trimmed and case-insensitive: `true/1/yes/on` and `false/0/no/off/empty`; unknown strings stay text. Blank numeric strings stay blank, and numeric date values stay decimal text.
 - Returns a `DocumentEnvelope` with `sheetCount`. Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`.
 
 ---
@@ -62,8 +64,17 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 ### `docgen_fill_form` <sub>tool</sub>
 
 - Provide exactly one `sourcePdf`: `{ base64 }` or `{ url }` (public https serving `application/pdf`), plus `fields` mapping exact, case-sensitive AcroForm field names to values. Flat or XFA-only PDFs return `not_a_form`.
+- Obtain exact names and choice options with `docgen_list_form_fields` before filling an unfamiliar PDF.
 - Returns a `DocumentEnvelope` with `pageCount` and `unmatchedFields[]` for names with no matching field.
 - `flatten: true` makes the filled values non-editable (default `false`).
+
+---
+
+### `docgen_list_form_fields` <sub>tool</sub>
+
+- Accepts the same `sourcePdf` base64-or-URL source as `docgen_fill_form`. Returns `{ fields: [{ name, type, required, options? }] }` without modifying the PDF or storing a document.
+- Types: `text`, `checkbox`, `dropdown`, `optionList`, `radioGroup`, `signature`, `button`. Only dropdown, optionList and radioGroup entries include `options`; signatures and buttons are discovery only.
+- Nested names retain their exact paths. PDFs without AcroForm fields return `not_a_form`.
 
 ---
 
@@ -86,10 +97,10 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 docgen-specific:
 
 - No external API — a bundled rendering stack (`pdf-lib`, `exceljs`, `marked`), so renders are local and deterministic with no upstream to fail
-- One shared `DocumentEnvelope` across all four tools — the three writers and the reader are interchangeable to the agent, and the resource-URI vs. inline-base64 delivery decision lives in one place
+- One shared `DocumentEnvelope` across the four document delivery tools; field inspection returns its inventory directly
 - Bounded renders — a per-document byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a wall-clock timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed, recoverable error instead of a hang
 - Tenant-scoped, TTL-bounded storage — a document id minted for one tenant resolves only for that tenant; outputs are downloads, not records, so they expire rather than accumulate
-- SSRF-guarded form fetch — `docgen_fill_form` with a URL source resolves DNS and checks the destination IP before fetching, blocking private/loopback/link-local ranges
+- SSRF-guarded form fetch — both form tools vet every resolved address at each HTTPS redirect hop and open a fresh connection only to a vetted destination, preserving TLS identity and HTTP Host; private, loopback and link-local destinations are blocked
 
 Agent-friendly output:
 
@@ -97,6 +108,7 @@ Agent-friendly output:
 - Inline-vs-resource by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`, so a large workbook isn't base64-inlined into a tool result; above the threshold, delivery is via the resource URI
 - Partial-fill reporting — `docgen_fill_form` returns `unmatchedFields[]` so the agent learns which field names didn't land and can correct and re-render rather than assuming a clean fill
 - Typed error contract with recovery hints — each tool declares its failure surface (`invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`, `not_a_form`, `source_unfetchable`, `document_expired`, …) with actionable next-step text
+- Semantic validation uses `ValidationError` (`-32007`); malformed arguments use `InvalidParams` (`-32602`). Fetch errors remain `ServiceUnavailable`, timeouts `Timeout`, and expired documents `NotFound`.
 
 ## Getting started
 
@@ -165,7 +177,7 @@ Documents are delivered by the `docgen://document/{id}` resource (and inline bas
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+); development uses Bun v1.4.2.
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+); development uses Bun v1.4.3.
 
 ### Installation
 

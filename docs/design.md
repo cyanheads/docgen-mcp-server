@@ -18,11 +18,12 @@ Source of truth for scope and decisions: [`docs/idea.md`](./idea.md).
 | `docgen_render_pdf` | Render HTML/markdown (or a template + data) to a PDF document. | `false` | `false` | `source` (oneOf discriminated-union: `{ html: string }` \| `{ markdown: string }` \| `{ template: string, data: Record<string,unknown> }`), `pageOptions` | `DocumentEnvelope` (id, resource URI, mime, byte size, page count, TTL, optional inline base64) |
 | `docgen_export_spreadsheet` | Render one or more named sheets of row objects to an `.xlsx` workbook. | `false` | `false` | `sheets[]` (name + rows + optional column spec) | `DocumentEnvelope` (without `pageCount`; adds `sheetCount`) |
 | `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF, optionally flatten it. | `false` | `false` | `sourcePdf` (oneOf: `base64` \| `url`), `fields` (name→value map), `flatten` | `DocumentEnvelope` + `unmatchedFields[]` |
+| `docgen_list_form_fields` | Inspect every supported AcroForm field without modifying or storing the PDF. | `true` | `false` | `sourcePdf` (exactly one of `base64` \| `url`) | `{ fields: [{ name, type, required, options? }] }` |
 | `docgen_get_document` | Re-fetch a previously rendered document by the id a `render/export/fill` tool returned. | `true` | `false` | `documentId` | `DocumentEnvelope` (same shape the originating tool returned) |
 
 `readOnlyHint` is `false` on the three `render/export/fill` tools because each **writes** a stored
 artifact (tenant-scoped storage, TTL-bounded) as a side effect — even though no external
-system is mutated. `docgen_get_document` is a pure read. `openWorldHint` is `false`
+system is mutated. `docgen_get_document` and `docgen_list_form_fields` are pure reads. `openWorldHint` is `false`
 everywhere: all rendering is local and deterministic, no live external API is contacted at
 render time. (`docgen_fill_form` with `sourcePdf.url` fetches one caller-named URL — an
 explicit input, not open-world discovery; see Design Decisions.)
@@ -91,6 +92,7 @@ of the fleet.
   (header label, type, width, number/date format).
 - Fill the AcroForm fields of a supplied PDF (base64 or URL) from a field→value map, and
   optionally flatten.
+- Discover exact nested AcroForm names, required flags and canonical types (`text | checkbox | dropdown | optionList | radioGroup | signature | button`). Only dropdown, optionList and radioGroup expose `options`; signatures and buttons are discovery only. Inspection neither saves the PDF nor writes a stored document.
 - Deliver every output two ways from one envelope: a **resource URI** (stable read path) and
   **inline base64** (local/stdio path), carrying identical metadata. (A hosted `downloadUrl` is
   reserved for a future HTTP download route — not emitted in v1.)
@@ -117,8 +119,7 @@ of the fleet.
 - **`.docx`** — faithful Word output is far harder than PDF/xlsx and lower-value for agents.
   Deferred until real demand appears.
 - **Diagrams / charts / SVG** — already rendered client-side; deliberately not docgen's job.
-- **Document *reading*/parsing** — docgen writes bytes, it does not extract text or parse
-  uploaded documents. (This is why the name is `docgen`, not `document` — see idea.md.)
+- **Document text extraction/parsing** — form-field inventory is supported, but general document reading remains out of scope.
 - **High-fidelity HTML→PDF via headless Chromium** — deferred behind a flag; v1 ships the
   lightweight programmatic path (see Design Decisions and v1 Scope).
 
@@ -206,8 +207,7 @@ surfaces as `document_expired` (see Error Contract).
   (Excel number/date format string, e.g. `'#,##0.00'`, `'yyyy-mm-dd'`).
 - **`fields`** (fill_form): `Record<string, string | number | boolean>` — AcroForm field
   name → value. **Field names must match the PDF's internal AcroForm field names exactly
-  (case-sensitive).** Obtain field names from the person or system that supplied the PDF — the
-  form's field names are not exposed by docgen. Unmatched names are returned in
+  (case-sensitive).** Obtain names and choice options from `docgen_list_form_fields`. Unmatched names are returned in
   `unmatchedFields[]` rather than causing a failure; re-render with corrected names.
 
 ---
@@ -218,7 +218,7 @@ No external API → the service layer is the bundled rendering stack plus the ar
 
 | Service | Responsibility | Key methods |
 |---|---|---|
-| `RenderService` | Owns the rendering stack. PDF from HTML/markdown (lightweight engine in v1), `.xlsx` from sheet specs, AcroForm fill + flatten. Enforces the byte ceiling and render timeout; classifies render failures. | `renderPdf(source, pageOptions, ctx)`, `renderSpreadsheet(sheets, ctx)`, `fillForm(sourceBytes, fields, flatten, ctx)` — each returns `{ bytes, mimeType, pageCount?/sheetCount? }` |
+| `RenderService` | Owns PDF/xlsx rendering, AcroForm fill + flatten and read-only field inventory. Enforces rendering bounds and classifies failures. | `renderPdf(source, pageOptions, ctx)`, `renderSpreadsheet(sheets, ctx)`, `fillForm(sourceBytes, fields, flatten, ctx)` return document bytes; `listFormFields(sourceBytes, ctx)` returns inventory entries. |
 | `DocumentStore` | Persists rendered artifacts and their metadata, mints document ids, enforces TTL, resolves ids back to bytes+metadata. Thin wrapper over `ctx.state` — meta record and base64 blob under separate tenant-scoped keys. | `put(result, ctx)` → `DocumentEnvelope`; `get(documentId, ctx)` → `{ meta, bytes }` or `null`; `buildEnvelope(meta, bytes, ctx)` |
 
 Both follow the framework init/accessor pattern (`getRenderService()` / `getDocumentStore()`,
@@ -322,11 +322,9 @@ docgen.
 | 4 | Server | Stores, returns envelope (`sheetCount`, no `pageCount`). |
 | 5 | Human | Downloads the workbook. |
 
-**3. Fill a provided form.** The **field names are an input the agent must already hold**
-(from the form's definition / the human) — docgen v1 does not discover them. Use
-`unmatchedFields[]` in the response to iteratively correct misnamed fields; the deferred
-`docgen_list_form_fields` tool (see v1 Scope vs. Deferred) will expose the field inventory
-when available.
+**3. Fill a provided form.** First inspect an unfamiliar PDF with `docgen_list_form_fields`
+using the same base64-or-URL source. Use its exact names and choice options in
+`docgen_fill_form`; `unmatchedFields[]` provides a correction loop.
 
 | # | Actor | Step |
 |---|---|---|
@@ -351,38 +349,43 @@ is the canonical "tool B's input comes from tool A's output" dependency, stated 
 
 The `render/export/fill` tools have a non-trivial typed failure surface (input gates + render bounds +
 the form-fetch branch); declare it inline per tool via `errors: [...]` and throw with
-`ctx.fail`. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`,
-`ValidationError`, `SerializationError`) bubble freely and are not declared.
+`ctx.fail` or the matching service error factory. Framework baseline codes may bubble freely;
+docgen's named semantic, fetch and timeout reasons are declared inline for recovery guidance.
 
 | Tool | `reason` | Code | When | Recovery |
 |---|---|---|---|---|
-| all `render/export/fill` | `document_too_large` | `InvalidParams` | Rendered artifact exceeded `DOCGEN_MAX_DOCUMENT_BYTES`. | Reduce content (fewer rows/pages, smaller images) and retry. |
+| all `render/export/fill` | `document_too_large` | `ValidationError` | Rendered artifact exceeded `DOCGEN_MAX_DOCUMENT_BYTES`. | Reduce content (fewer rows/pages, smaller images) and retry. |
 | all `render/export/fill` | `render_timeout` | `Timeout` | Render exceeded `DOCGEN_RENDER_TIMEOUT_MS`. | Simplify the document or split it into smaller renders. |
-| `docgen_render_pdf` | `invalid_source` | `InvalidParams` | None of `html` / `markdown` / `template`+`data` was provided, more than one was, or `data` was supplied without a `template`. | Provide exactly one source form; `data` pairs only with `template`. |
-| `docgen_render_pdf` | `template_render_failed` | `InvalidParams` | The template referenced data keys absent from `data`, or the template was malformed. | Check the template's referenced fields against the `data` object. |
-| `docgen_export_spreadsheet` | `empty_workbook` | `InvalidParams` | `sheets[]` was empty (no sheets at all). | Provide at least one sheet. |
-| `docgen_export_spreadsheet` | `invalid_sheet_name` | `InvalidParams` | A worksheet name is blank, over 31 characters, contains `* ? : \ / [ ]`, begins or ends with an apostrophe, or duplicates another (case-insensitive). | Rename to a unique 1–31 character label without the forbidden characters. |
-| `docgen_fill_form` | `not_a_form` | `InvalidParams` | The source PDF has no AcroForm fields to fill. | Confirm the PDF is a fillable form; a flat PDF cannot be filled. |
-| `docgen_fill_form` | `source_unfetchable` | `ServiceUnavailable` | `sourcePdf.url` did not return a fetchable PDF (non-2xx, not a PDF, response over `DOCGEN_MAX_DOCUMENT_BYTES`, or blocked by SSRF guard — see below). | Verify the URL is public, reachable, and serves `application/pdf`; or pass the PDF as base64 to skip the fetch entirely. |
-| `docgen_fill_form` | `invalid_pdf_source` | `InvalidParams` | `sourcePdf.base64` was provided but is not a valid base64-encoded PDF. | Re-encode the PDF as base64 and verify the content starts with `JVBERi` (the base64 prefix for `%PDF-`). |
+| `docgen_render_pdf` | `invalid_source` | `ValidationError` | None of `html` / `markdown` / `template`+`data` was provided, more than one was, or `data` was supplied without a `template`. | Provide exactly one source form; `data` pairs only with `template`. |
+| `docgen_render_pdf` | `template_render_failed` | `ValidationError` | The template referenced data keys absent from `data`, or the template was malformed. | Check the template's referenced fields against the `data` object. |
+| `docgen_export_spreadsheet` | `empty_workbook` | `ValidationError` | `sheets[]` was empty (no sheets at all). | Provide at least one sheet. |
+| `docgen_export_spreadsheet` | `invalid_sheet_name` | `ValidationError` | A worksheet name is blank, over 31 characters, contains `* ? : \ / [ ]`, begins or ends with an apostrophe, or duplicates another (case-insensitive). | Rename to a unique 1–31 character label without the forbidden characters. |
+| both form tools | `invalid_source` | `ValidationError` | Neither source variant was supplied, or both were. | Provide exactly one base64-or-URL source. |
+| both form tools | `not_a_form` | `ValidationError` | The source PDF has no AcroForm fields. | Confirm the PDF is a fillable form. |
+| both form tools | `source_unfetchable` | `ServiceUnavailable` | The URL is blocked or did not return a fetchable PDF. | Verify public https and PDF content type, or use base64. |
+| both form tools | `invalid_pdf_source` | `ValidationError` | The source is malformed base64 or invalid PDF bytes. | Re-encode and verify the PDF. |
+| `docgen_list_form_fields` | `render_timeout` | `Timeout` | Inspection exceeded the configured deadline. | Use a smaller or simpler PDF and retry. |
 | `docgen_get_document` | `document_expired` | `NotFound` | No stored document for that id — expired past TTL, or never existed. | Re-render with the originating `render/export/fill` tool; ids are not reusable across renders. |
 
 `document_too_large` and `render_timeout` are declared on each `render/export/fill` tool's own
 `errors[]` (per-tool locality — no shared constant), even though the `when`/`recovery` text is
 identical.
 
-**SSRF guard spec** (enforced on the `sourcePdf.url` fetch path in `fill_form`):
+Semantic errors use `ValidationError` (-32007); malformed tool arguments remain `InvalidParams` (-32602). Rejection rules and recovery hints are unchanged.
+
+**SSRF guard spec** (shared by both form tools' `sourcePdf.url` fetch path):
 
 - Scheme must be `https` — `http` is rejected.
 - Destination IP must not be in RFC 1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or `::1`.
-  DNS resolution happens inside the guard — the resolved IP is checked, not just the hostname.
+  Every resolved candidate is checked at each hop, with equivalent IPv6 forms normalized and the full IPv6 link-local range covered. A fresh HTTPS socket connects only to a vetted address, preserving original TLS identity, SNI and HTTP Host.
 - Response `Content-Type` must be `application/pdf` (checked before buffering the body).
 - Response body is capped at `DOCGEN_MAX_DOCUMENT_BYTES`; an over-limit response is rejected
   before the full body is read.
 - Redirects are followed up to a fixed limit (3); a redirect to a private IP triggers the same
   block as a direct private-IP request.
 - Any guard violation surfaces as `source_unfetchable` with a `ServiceUnavailable` code.
+- Deadlines and caller cancellation cover DNS, connection and body reading; an already-cancelled call opens no request.
 
 ---
 
@@ -408,7 +411,7 @@ identical.
   size of one blob*, handled by the inline-vs-link threshold above, not by paging.
 - **Enrichment.** Render stats the agent reasons with but that aren't the document itself
   (e.g. `engine: 'lightweight'`, a `degraded: true` flag when the lightweight engine dropped
-  unsupported CSS — see Known Limitations) ride in an `enrichment` block via `ctx.enrich`, so
+  unsupported CSS or replaced text characters — see Known Limitations) ride in an `enrichment` block via `ctx.enrich`, so
   they reach both client surfaces without bloating the envelope.
 
 ---
@@ -464,7 +467,7 @@ identical.
   arbitrary CSS — complex flex/grid layouts, web fonts, and advanced page-break control are
   constrained. Agents needing pixel-faithful full-CSS HTML→PDF wait for the deferred
   `chromium` engine. The handler surfaces a `degraded: true` enrichment flag when it drops
-  unsupported styling so the agent isn't misled about fidelity.
+  unsupported styling or replaces characters with `?` on any text surface, including headers and footers. Existing smart-punctuation transliteration and supported Latin-1 remain non-degraded absent another trigger.
 - **Untrusted HTML is an input sink.** `docgen_render_pdf` renders caller-supplied HTML. The
   lightweight engine has a far smaller attack surface than a real browser (no JS execution, no
   network fetches from the document), but the `security-pass` step must confirm no
@@ -477,10 +480,7 @@ identical.
   (some government PDFs) are not supported by `pdf-lib`; `not_a_form` fires when no fillable
   AcroForm is present. XFA-only PDFs also trigger `not_a_form` — there is no distinction
   between a flat PDF and an XFA-only PDF from the error surface.
-- **Field name discovery is out of scope in v1.** Agents filling a form they have not seen
-  before must obtain field names from the human or from a trusted description of the form.
-  The `unmatchedFields[]` return provides a correction loop. A `docgen_list_form_fields` tool
-  is deferred (see v1 Scope vs. Deferred).
+- **Field discovery does not expand filling support.** Signature and button fields are inventory entries; signing and button actions remain out of scope.
 - **Ephemeral by default.** With the in-memory provider, a restart drops all stored documents;
   ids minted before the restart return `document_expired`. Durable retention requires a
   filesystem/R2 provider. This is intended (downloads, not records) but is a real constraint
@@ -500,6 +500,7 @@ identical.
 - `docgen_render_pdf` (HTML / markdown / template+data) via the **lightweight** engine
 - `docgen_export_spreadsheet` (multi-sheet `.xlsx`, column spec)
 - `docgen_fill_form` (AcroForm fill + flatten; base64 and URL source)
+- `docgen_list_form_fields` (read-only AcroForm inventory; same base64 and URL source)
 - `docgen_get_document` (re-fetch by id)
 - `docgen://document/{documentId}` resource (blob + metadata)
 - Shared `DocumentEnvelope`; dual delivery (resource/URL + inline base64)
@@ -518,9 +519,3 @@ identical.
   supports the poll-for-completion shape; the async render itself is deferred with the engine.
 - **`.docx` output** — only if real demand appears.
 - **Prompt templates** for common document types (invoice, letter) — sugar, not workflow.
-- **`docgen_list_form_fields`** (DX enhancement, not P0) — accepts the same `sourcePdf`
-  input as `fill_form` (base64 or URL) and returns the AcroForm field inventory: field
-  name, type (`text | checkbox | radio | select | signature`), and whether it is required.
-  Useful when the agent does not already know the form's field names. Deferred: the
-  fill-and-correct loop via `unmatchedFields[]` is sufficient for v1; add this tool when
-  form-fill adoption shows that agents commonly mis-name fields on the first attempt.

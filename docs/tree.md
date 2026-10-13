@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-10-07 11:18:53
+Generated on: 2026-10-13 13:58:09
 
 ```text
 docgen-mcp-server/
@@ -149,6 +149,7 @@ docgen-mcp-server/
 │   │           ├── export-spreadsheet.tool.ts
 │   │           ├── fill-form.tool.ts
 │   │           ├── get-document.tool.ts
+│   │           ├── list-form-fields.tool.ts
 │   │           └── render-pdf.tool.ts
 │   ├── services/
 │   │   └── document/
@@ -158,6 +159,7 @@ docgen-mcp-server/
 │   │       ├── html-blocks.ts
 │   │       ├── render-service.ts
 │   │       ├── render-types.ts
+│   │       ├── source-pdf.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/

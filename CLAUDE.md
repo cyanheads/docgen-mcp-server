@@ -2,9 +2,9 @@
 
 **Server:** docgen-mcp-server
 **Version:** 0.2.4
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.13`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
 **Zod:** ^4.6.5
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
@@ -19,9 +19,10 @@ docgen-mcp-server renders structured agent content into downloadable binary docu
 
 | Definition | Kind | What it does |
 |:-----------|:-----|:-------------|
-| `docgen_render_pdf` | tool | HTML / markdown / `{{template}}+data` → PDF (lightweight pdf-lib engine). Sets a `degraded` enrichment flag when it drops unsupported styling (CSS, images, scripts). |
+| `docgen_render_pdf` | tool | HTML / markdown / `{{template}}+data` → PDF (lightweight pdf-lib engine). Sets `degraded` for dropped styling or character replacement on any text surface; smart-punctuation transliteration alone remains non-degraded. |
 | `docgen_export_spreadsheet` | tool | One or more named row sheets → `.xlsx` (exceljs), with an optional per-column type/format spec. |
 | `docgen_fill_form` | tool | Fill (and optionally flatten) the AcroForm fields of a supplied PDF — source as `{ base64 }` or an `{ url }` fetched behind an SSRF guard. Unmatched field names come back in `unmatchedFields[]`. |
+| `docgen_list_form_fields` | tool | Read-only field discovery from the same source: `{ fields: [{ name, type, required, options? }] }`. Types: text, checkbox, dropdown, optionList, radioGroup, signature, button. Only choice fields include options; signatures/buttons are discovery only. No PDF modification or document storage. |
 | `docgen_get_document` | tool | Re-fetch a previously rendered document by its `documentId`. Pure read; `document_expired` once the TTL lapses. |
 | `docgen://document/{documentId}` | resource | The stable-URI delivery surface — a byte blob (real mime type) + a JSON metadata block. |
 
@@ -29,7 +30,8 @@ docgen-mcp-server renders structured agent content into downloadable binary docu
 
 - `render-service.ts` — the bundled rendering stack (PDF, xlsx, form-fill); enforces the byte ceiling + per-render timeout and classifies failures into the typed reasons the tools declare.
 - `document-store.ts` — mints opaque ids, persists bytes + metadata via tenant-scoped `ctx.state` under a shared TTL, builds the envelope. A leaked id never crosses the tenant boundary.
-- `fetch-guard.ts` — SSRF-guarded PDF fetcher for the `fill_form` URL source: https-only, blocks private/loopback/link-local/metadata destinations by resolving DNS and checking the resolved IP, re-validates every redirect hop, enforces `application/pdf`, caps the body. Every failure path is normalized to a leak-free `source_unfetchable` error.
+- `fetch-guard.ts` — HTTPS PDF fetcher shared by both form tools. Vets all resolved addresses at every redirect hop, connects only to a vetted address using a fresh socket with TLS identity and Host preserved, blocks private/loopback/link-local/metadata destinations, enforces PDF content type, byte cap, deadline and cancellation. Failures are leak-free `source_unfetchable` errors.
+- `source-pdf.ts` — shared source-pair validation, base64 decoding and guarded URL resolution.
 - `html-blocks.ts` — reduces HTML/markdown to a linear block model for the lightweight engine (no JS execution, no remote-resource fetch); flags `degraded` for anything it can't render.
 - `format-envelope.ts` / `types.ts` / `render-types.ts` — the shared `DocumentEnvelope` formatter, domain types, and render-input schemas.
 
@@ -252,6 +254,8 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
+docgen semantic reasons use `ValidationError` (`-32007`): empty_workbook, invalid_source, invalid_sheet_name, invalid_pdf_source, not_a_form, template_render_failed, document_too_large. Schema failures stay `InvalidParams` (`-32602`); fetch, timeout and missing-document codes remain unchanged.
+
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)`. Production tool calls fill `data.recovery.hint` from the matching declared reason when the throw has no hint; both `structuredContent` and `content[]` carry it. Explicit hints override the contract. `recovery` is required (≥ 5 words, lint-validated). Tool error envelopes carry `data.requestId`, and tool error text closes with the request id. Resource parameter rejections (`-32602`) preserve `data: { uri }`; generic protocol errors need not carry a request id. Direct handler calls bypass the tool hint fill, so service and resource tests that assert a hint directly retain `ctx.recoveryFor`. Mark service-thrown entries `thrownBy: 'service'` so `error-contract-unthrown` skips them; docgen's render and fetch services use this pattern. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) need no declaration.
 
 ```ts
@@ -307,12 +311,14 @@ src/
       html-blocks.ts                    # HTML/markdown → linear block model for the lightweight engine
       format-envelope.ts                # Shared DocumentEnvelope formatter
       render-types.ts                   # Render-input Zod schemas
+      source-pdf.ts                     # Shared form-source validation and resolution
       types.ts                          # Domain types (DocumentEnvelope, StoredDocumentMeta)
   mcp-server/
     tools/definitions/
       render-pdf.tool.ts                # docgen_render_pdf
       export-spreadsheet.tool.ts        # docgen_export_spreadsheet
       fill-form.tool.ts                 # docgen_fill_form
+      list-form-fields.tool.ts          # docgen_list_form_fields
       get-document.tool.ts              # docgen_get_document
     resources/definitions/
       document.resource.ts              # docgen://document/{documentId}
@@ -438,7 +444,7 @@ security: false                            # optional — true ONLY for a source
 ...
 ```
 
-`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section. When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
+`breaking: true` renders a `· ⚠️ Breaking` badge — use it when consumers must update code on upgrade (signature changes, removed APIs, config renames). `security: true` renders a `· 🛡️ Security` badge and pairs with a `## Security` body section — set it only for a security fix in this server's own source code, never for a dependency or transitive CVE bump (record those under `## Dependencies`). When both are set, badges render `· ⚠️ Breaking · 🛡️ Security`.
 
 `agent-notes` is an optional free-form field for maintenance agents processing the release downstream. Content here won't appear in the rendered CHANGELOG — it's consumed by agents running the `maintenance` skill. Use it for adoption instructions that don't fit the human-facing sections: new files to create, fields to populate, one-time migration steps. Omit entirely when there's nothing to say.
 
