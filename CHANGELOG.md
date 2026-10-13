@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-13 · ⚠️ Breaking · 🛡️ Security
+
+Discover PDF form fields and preserve document values, text and HTTPS destination boundaries.
+
 ## [0.2.4](changelog/0.2.x/0.2.4.md) — 2026-10-07
 
 Updates mcp-ts-core to 0.13.13, adopts automatic error recovery hints, and aligns Docker, registry launch metadata, and plugin configuration.

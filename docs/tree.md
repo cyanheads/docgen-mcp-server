@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-10-13 13:58:09
+Generated on: 2026-10-13 14:20:38
 
 ```text
 docgen-mcp-server/
@@ -26,6 +26,7 @@ docgen-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
