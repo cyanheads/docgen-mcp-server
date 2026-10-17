@@ -23,7 +23,7 @@
 
 ## Overview
 
-Document rendering built on a bundled stack — pdf-lib for PDF and AcroForm fill, exceljs for spreadsheets, marked for markdown. Render HTML, markdown, or template data to PDF, export tabular rows to xlsx, and fill AcroForm PDF forms from any MCP client. Runs as a stdio process or a local Streamable HTTP server.
+Generate documents from an agent: render HTML, markdown, or template data to PDF, export rows to Excel, and fill PDF forms. Everything renders locally on a bundled stack (pdf-lib, exceljs, marked).
 
 ### Tools
 
@@ -48,7 +48,7 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 ### `docgen_render_pdf` <sub>tool</sub>
 
 - Provide exactly one `source`: `{ html }`, `{ markdown }`, or `{ template, data }` for `{{key}}` interpolation. `pageOptions` controls page size/orientation, CSS-length margins, headers/footers (`{{page}}`, `{{total}}`, `{{date}}`) and page numbers.
-- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` signals dropped CSS, images or scripts, or character replacement with `?` on body text, tables, headers or footers. Supported Latin-1 and existing smart-punctuation transliteration remain non-degraded. The lightweight engine renders headings, paragraphs, lists and tables.
+- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` means CSS, images or scripts were dropped, or characters were replaced with `?`. The lightweight engine renders headings, paragraphs, lists and tables.
 - Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`.
 
 ---
@@ -56,7 +56,7 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 ### `docgen_export_spreadsheet` <sub>tool</sub>
 
 - Supply at least one sheet with a unique `name` (1–31 characters) and scalar `rows[]`; empty rows yield a header-only sheet. Optional `columns[]` sets headers, type (`string` / `number` / `date` / `boolean`), width and Excel format.
-- Omitted columns use all row keys in first-seen order. Boolean strings are trimmed and case-insensitive: `true/1/yes/on` and `false/0/no/off/empty`; unknown strings stay text. Blank numeric strings stay blank, and numeric date values stay decimal text.
+- Omitted columns use all row keys in first-seen order. Boolean columns accept `true/1/yes/on` and `false/0/no/off`, case-insensitive; other strings stay text.
 - Returns a `DocumentEnvelope` with `sheetCount`. Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`.
 
 ---
@@ -98,17 +98,16 @@ docgen-specific:
 
 - No external API — a bundled rendering stack (`pdf-lib`, `exceljs`, `marked`), so renders are local and deterministic with no upstream to fail
 - One shared `DocumentEnvelope` across the four document delivery tools; field inspection returns its inventory directly
-- Bounded renders — a per-document byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a wall-clock timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed, recoverable error instead of a hang
-- Tenant-scoped, TTL-bounded storage — a document id minted for one tenant resolves only for that tenant; outputs are downloads, not records, so they expire rather than accumulate
-- SSRF-guarded form fetch — both form tools vet every resolved address at each HTTPS redirect hop and open a fresh connection only to a vetted destination, preserving TLS identity and HTTP Host; private, loopback and link-local destinations are blocked
+- Bounded renders — a byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed error instead of a hang
+- Tenant-scoped, expiring storage — a document id resolves only for the tenant that created it, and documents expire rather than accumulate
+- SSRF-guarded form fetch — both form tools check every address, including each redirect hop, and block private, loopback and link-local destinations
 
 Agent-friendly output:
 
-- Dual-surface delivery — every envelope field lands in both `structuredContent` and the `format()` markdown twin, so tool-only and resource-only clients both see the `documentId`, resource URI, inline-availability status, size, and TTL
-- Inline-vs-resource by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`, so a large workbook isn't base64-inlined into a tool result; above the threshold, delivery is via the resource URI
-- Partial-fill reporting — `docgen_fill_form` returns `unmatchedFields[]` so the agent learns which field names didn't land and can correct and re-render rather than assuming a clean fill
-- Typed error contract with recovery hints — each tool declares its failure surface (`invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`, `not_a_form`, `source_unfetchable`, `document_expired`, …) with actionable next-step text
-- Semantic validation uses `ValidationError` (`-32007`); malformed arguments use `InvalidParams` (`-32602`). Fetch errors remain `ServiceUnavailable`, timeouts `Timeout`, and expired documents `NotFound`.
+- Dual-surface delivery — every envelope field appears in both `structuredContent` and the markdown output, including the `documentId`, resource URI, size, and TTL
+- Inline by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`; larger documents are delivered through the resource URI
+- Partial-fill reporting — `docgen_fill_form` returns `unmatchedFields[]` so the agent sees which field names didn't match
+- Typed errors with recovery hints (`invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`, `not_a_form`, `source_unfetchable`, `document_expired`, …); semantic validation uses `ValidationError` (`-32007`) and malformed arguments `InvalidParams` (`-32602`)
 
 ## Getting started
 
@@ -219,9 +218,9 @@ All configuration is optional — docgen runs with no required environment varia
 | `DOCGEN_PDF_ENGINE` | PDF rendering engine. Only `lightweight` is implemented; `chromium` is reserved and rejected at startup. | `lightweight` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
-| `MCP_SESSION_MODE` | HTTP session posture: `auto`, `stateful`, or `stateless`. docgen declares `stateless` in code, since no tool asks for input mid-handler and documents live in tenant-scoped storage rather than the session store. The env var overrides it when set; the framework's `auto` default resolves to `stateful`. | `stateless` |
+| `MCP_SESSION_MODE` | HTTP session mode: `auto`, `stateful`, or `stateless`. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
-| `MCP_PUBLIC_URL` | Public origin behind a TLS proxy. (The `downloadUrl` envelope field is reserved for a future HTTP download route and is not emitted in this version.) | — |
+| `MCP_PUBLIC_URL` | Public origin behind a TLS proxy. | — |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOG_TOOL_FAILURE_PAYLOADS` | Log failed arguments/results, redacted by key name and capped by `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). Free-form values may retain secrets. | `false` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend for document bytes + metadata. | `in-memory` |
@@ -231,7 +230,7 @@ All configuration is optional — docgen runs with no required environment varia
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
-> Documents are stored in `ctx.state`, which the in-memory provider keeps in process memory — a restart drops every stored document, and an id minted before the restart returns `document_expired`. This is intended (outputs are downloads, not records); for durable retention across restarts, point `STORAGE_PROVIDER_TYPE` at a persistent backend.
+> The default in-memory storage drops every document on restart, and earlier ids then return `document_expired`. To keep documents across restarts, point `STORAGE_PROVIDER_TYPE` at a persistent backend.
 
 ## Running the server
 
