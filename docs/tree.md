@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-10-13 14:20:38
+Generated on: 2026-11-11 08:56:40
 
 ```text
 docgen-mcp-server/
@@ -39,6 +39,8 @@ docgen-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -136,6 +138,9 @@ docgen-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── docgen-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -156,6 +161,8 @@ docgen-mcp-server/
 │   │   └── document/
 │   │       ├── document-store.ts
 │   │       ├── fetch-guard.ts
+│   │       ├── form-assignments.ts
+│   │       ├── form-inventory.ts
 │   │       ├── format-envelope.ts
 │   │       ├── html-blocks.ts
 │   │       ├── render-service.ts
@@ -196,7 +203,9 @@ docgen-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

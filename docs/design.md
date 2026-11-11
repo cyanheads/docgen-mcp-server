@@ -17,8 +17,8 @@ Source of truth for scope and decisions: [`docs/idea.md`](./idea.md).
 |---|---|---|---|---|---|
 | `docgen_render_pdf` | Render HTML/markdown (or a template + data) to a PDF document. | `false` | `false` | `source` (oneOf discriminated-union: `{ html: string }` \| `{ markdown: string }` \| `{ template: string, data: Record<string,unknown> }`), `pageOptions` | `DocumentEnvelope` (id, resource URI, mime, byte size, page count, TTL, optional inline base64) |
 | `docgen_export_spreadsheet` | Render one or more named sheets of row objects to an `.xlsx` workbook. | `false` | `false` | `sheets[]` (name + rows + optional column spec) | `DocumentEnvelope` (without `pageCount`; adds `sheetCount`) |
-| `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF, optionally flatten it. | `false` | `false` | `sourcePdf` (oneOf: `base64` \| `url`), `fields` (name→value map), `flatten` | `DocumentEnvelope` + `unmatchedFields[]` |
-| `docgen_list_form_fields` | Inspect every supported AcroForm field without modifying or storing the PDF. | `true` | `false` | `sourcePdf` (exactly one of `base64` \| `url`) | `{ fields: [{ name, type, required, options? }] }` |
+| `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF, optionally flatten it. | `false` | `false` | `sourcePdf` (oneOf: `base64` \| `url`), `fields` (name→value map), `flatten` | `DocumentEnvelope` + `unmatchedFields[]`, `resolvedFields[]`, `madeEditableFields[]` and notices |
+| `docgen_list_form_fields` | Inspect every supported AcroForm field without modifying or storing the PDF. | `true` | `false` | `sourcePdf` (exactly one of `base64` \| `url`) | `{ fields: [{ name, type, required, options?, label?, maxLength?, onValue?, value?, page? }] }` |
 | `docgen_get_document` | Re-fetch a previously rendered document by the id a `render/export/fill` tool returned. | `true` | `false` | `documentId` | `DocumentEnvelope` (same shape the originating tool returned) |
 
 `readOnlyHint` is `false` on the three `render/export/fill` tools because each **writes** a stored
@@ -30,14 +30,15 @@ explicit input, not open-world discovery; see Design Decisions.)
 
 ### Resources
 
-| URI template | Returns |
+| URI or template | Returns |
 |---|---|
 | `docgen://document/{documentId}` | The rendered document — two content items: (1) a `blob` with `mimeType` set to the document's real mime type and the raw bytes as base64, and (2) a `text` item containing a JSON metadata block (`{ documentId, byteSize, pageCount?, sheetCount?, createdAt, ttlSecondsRemaining }`). `documentId` is the id returned by any `render/export/fill` tool. Readable until the TTL expires, then `notFound`. |
+| `skill://docgen-guide/SKILL.md` | Published inspect → fill → review → flatten workflow. Listed in `resources/list` and available through the Skills extension; the SDK registers a `skill://{+path}` resource template. |
 
 The resource is the stable-URI delivery surface: a host that supports resources resolves
-`docgen://document/{id}` to fetch the bytes directly. `docgen_get_document` is the
-tool-only twin (most clients are tool-only) — same backing store, same envelope. Neither
-re-renders; both read the stored artifact.
+`docgen://document/{id}` to fetch the bytes directly. `docgen_get_document` reads the same
+store and returns the delivery envelope under the same inline size limit. When inline
+bytes are omitted, the resource is required to retrieve them. Neither path re-renders.
 
 ### Prompts
 
@@ -92,7 +93,7 @@ of the fleet.
   (header label, type, width, number/date format).
 - Fill the AcroForm fields of a supplied PDF (base64 or URL) from a field→value map, and
   optionally flatten.
-- Discover exact nested AcroForm names, required flags and canonical types (`text | checkbox | dropdown | optionList | radioGroup | signature | button`). Only dropdown, optionList and radioGroup expose `options`; signatures and buttons are discovery only. Inspection neither saves the PDF nor writes a stored document.
+- Discover exact nested AcroForm names, required flags and canonical types (`text | checkbox | dropdown | optionList | radioGroup | signature | button`). Optional attributes expose the tooltip, maximum text length, checkbox on-state, current value and first widget's page. Only dropdown, optionList and radioGroup expose `options`; signatures and buttons are discovery only. Inspection neither saves the PDF nor writes a stored document.
 - Deliver every output two ways from one envelope: a **resource URI** (stable read path) and
   **inline base64** (local/stdio path), carrying identical metadata. (A hosted `downloadUrl` is
   reserved for a future HTTP download route — not emitted in v1.)
@@ -100,8 +101,7 @@ of the fleet.
 
 **Non-functional**
 
-- **No external API → no resilience layer.** No upstream retry/backoff. The server-as-service
-  state questions apply instead (below).
+- **Local rendering.** Only URL-sourced PDFs require network access; their guarded fetch tries vetted destinations within one deadline. There is no external rendering API.
 - **Bounded renders.** A per-document byte ceiling and a render timeout bound a runaway
   render (a pathological HTML page, an enormous sheet set). Exceeding either is a typed,
   recoverable error, not a hang.
@@ -110,9 +110,7 @@ of the fleet.
   download-and-go. A durable provider (filesystem / R2) is a config swap, not a code change.
 - **Tenant isolation.** A document id minted for one tenant resolves only for that tenant —
   enforced by `ctx.state` tenant-prefixing; a leaked id does not cross the tenant boundary.
-- **Hosting is an advantage, not a tax.** Hosted docgen returns a URL the human clicks —
-  exactly the delivery mechanism that makes artifact generation useful. The local/stdio path
-  round-trips base64 through the client.
+- **HTTP delivery remains deferred.** Both transports deliver document bytes through MCP resources or inline base64; no direct download route is served.
 
 **Out of scope (v1)**
 
@@ -151,7 +149,7 @@ interface DocumentEnvelope {
   createdAt: string;         // ISO 8601 UTC (e.g. "2026-06-23T12:00:00.000Z")
   inlineBase64?: string;     // the bytes, base64. Present (z.string().optional()) when the
                              //   artifact is at or under DOCGEN_INLINE_MAX_BYTES; field is
-                             //   absent (not empty string) when larger. Fetch via resource/URL
+                             //   absent (not empty string) when larger. Fetch via resourceUri
                              //   when omitted. See Output Design Notes.
 }
 ```
@@ -181,7 +179,7 @@ interface StoredDocumentMeta {
 // bytes: base64 string under `doc/blob/{documentId}`, written with the same TTL as the meta record
 ```
 
-Keys use `/` separators, not `:` — `ctx.state` storage keys disallow colons. Both the meta
+Keys use `/` separators for the metadata and blob namespaces. Both the meta
 record and the blob are written with the same `{ ttl }` so they expire together; an expired id
 surfaces as `document_expired` (see Error Contract).
 
@@ -205,10 +203,9 @@ surfaces as `document_expired` (see Error Contract).
   label), `type` (`'string' | 'number' | 'date' | 'boolean'`, default `'string'`), `width`
   (column width in character units, `z.number().positive()`), `format`
   (Excel number/date format string, e.g. `'#,##0.00'`, `'yyyy-mm-dd'`).
-- **`fields`** (fill_form): `Record<string, string | number | boolean>` — AcroForm field
-  name → value. **Field names must match the PDF's internal AcroForm field names exactly
-  (case-sensitive).** Obtain names and choice options from `docgen_list_form_fields`. Unmatched names are returned in
-  `unmatchedFields[]` rather than causing a failure; re-render with corrected names.
+- **`fields`** (fill_form): `Record<string, string | number | boolean>`. Exact names reserve their destinations across the entire map. Other keys resolve only when the union of exact last-segment and case-insensitive full-name matches contains one field, with no exact assignment or competing alias. Accepted aliases appear as `{ requested, resolved }` in `resolvedFields`; unknown, ambiguous and conflicting keys remain in `unmatchedFields`, in input order.
+- **Form values.** Checkbox booleans retain their meaning; strings are trimmed and matched case-insensitively against checked (`true`, `1`, `yes`, `on`, `x`, `checked`) and unchecked (`false`, `0`, `no`, `off`, `unchecked`, empty) aliases. The exact PDF export string wins over generic string aliases; unchecked aliases win over a folded export match. Unknown values uncheck with a notice. Radios and option lists prefer exact choices, then unique case-insensitive choices. Dropdown custom text stays literal; a fixed-to-editable transition is reported before flattening.
+- **Inventory values.** Unchecked boxes report `false`; unselected dropdowns and option lists report `[]`. Missing text/radio values are omitted, while an explicitly stored empty text string stays empty. Signature and button entries omit `value`. `page` is the 1-based page of the first widget, resolved through its page reference or annotation membership, and omitted when unknown.
 
 ---
 
@@ -222,9 +219,7 @@ No external API → the service layer is the bundled rendering stack plus the ar
 | `DocumentStore` | Persists rendered artifacts and their metadata, mints document ids, enforces TTL, resolves ids back to bytes+metadata. Thin wrapper over `ctx.state` — meta record and base64 blob under separate tenant-scoped keys. | `put(result, ctx)` → `DocumentEnvelope`; `get(documentId, ctx)` → `{ meta, bytes }` or `null`; `buildEnvelope(meta, bytes, ctx)` |
 
 Both follow the framework init/accessor pattern (`getRenderService()` / `getDocumentStore()`,
-initialized in `setup()`). No DataCanvas, no MirrorService, no retry layer — there is no
-upstream and no analytical row set to spill (a rendered document is one opaque blob, not a
-queryable table).
+initialized in `setup()`). No DataCanvas or MirrorService is needed: a rendered document is one opaque blob, not a queryable table. URL-source connection fallback belongs to the fetch guard.
 
 **Markdown path:** markdown → HTML via a small bundled converter, then through the same
 HTML→PDF engine. Keeps one PDF code path; markdown is sugar over the HTML input.
@@ -249,7 +244,7 @@ schema (`getServerConfig()` / `parseEnvConfig`). Framework env vars (transport, 
 | `DOCGEN_DOCUMENT_TTL_SECONDS` | How long a rendered document is retrievable before it expires. | `900` (15 min) | No |
 | `DOCGEN_MAX_DOCUMENT_BYTES` | Hard ceiling on a single rendered artifact; exceeding it aborts the render with `document_too_large`. | `26214400` (25 MB) | No |
 | `DOCGEN_RENDER_TIMEOUT_MS` | Per-render wall-clock budget; exceeding it aborts with `render_timeout`. | `30000` | No |
-| `DOCGEN_INLINE_MAX_BYTES` | Artifacts at or under this size are returned inline as base64; larger ones omit `inlineBase64` and must be fetched via the resource/URL. | `5242880` (5 MB) | No |
+| `DOCGEN_INLINE_MAX_BYTES` | Artifacts at or under this size are returned inline as base64; larger ones omit `inlineBase64` and must be fetched via the document resource. | `5242880` (5 MB) | No |
 | `DOCGEN_PDF_ENGINE` | Selects the PDF rendering engine. `lightweight` (pdf-lib path) ships in v1; `chromium` is reserved for the deferred high-fidelity path and rejected at startup until implemented. | `lightweight` | No |
 
 Framework env vars worth calling out (already provided, no code needed):
@@ -323,14 +318,14 @@ docgen.
 | 5 | Human | Downloads the workbook. |
 
 **3. Fill a provided form.** First inspect an unfamiliar PDF with `docgen_list_form_fields`
-using the same base64-or-URL source. Use its exact names and choice options in
-`docgen_fill_form`; `unmatchedFields[]` provides a correction loop.
+using the same base64-or-URL source. Use its names, constraints and choice options in
+`docgen_fill_form`; inspect unmatched names, resolved aliases and editability notices before treating the fill as complete. Keep the form unflattened when its values still need to be read back.
 
 | # | Actor | Step |
 |---|---|---|
 | 1 | Agent → `docgen_fill_form` | `sourcePdf: { base64 }` (or `{ url }`), `fields: { ... }`, `flatten: true`. |
-| 2 | Server | Loads the PDF, fills matching AcroForm fields, flattens, stores. |
-| 3 | Server | Returns envelope + `unmatchedFields[]` (field names in the map that had no AcroForm counterpart — the agent's signal to fix names). |
+| 2 | Server | Resolves names, aggregates invalid assignments, fills fields, optionally flattens, then stores only a successful result. |
+| 3 | Server | Returns the envelope, unmatched names, resolved aliases and dropdown editability changes, with notices for custom dropdown and unrecognized checkbox values. |
 
 **4. Re-fetch by id (the explicit cross-tool hop).** `docgen_get_document` and the resource
 **only resolve an id a `render/export/fill` tool minted** — there is no other way to obtain one. This
@@ -339,7 +334,7 @@ is the canonical "tool B's input comes from tool A's output" dependency, stated 
 
 | # | Actor | Step |
 |---|---|---|
-| 1 | Agent | Holds a `documentId` from an earlier `render/export/fill` call (inline copy dropped, or URL expired-but-within-TTL). |
+| 1 | Agent | Holds a `documentId` from an earlier `render/export/fill` call and needs its bytes again within the TTL. |
 | 2 | Agent → `docgen_get_document` | `documentId`. |
 | 3 | Server | Resolves via `DocumentStore.get`; returns the same envelope, or `document_expired` if the TTL lapsed. |
 
@@ -362,8 +357,9 @@ docgen's named semantic, fetch and timeout reasons are declared inline for recov
 | `docgen_export_spreadsheet` | `invalid_sheet_name` | `ValidationError` | A worksheet name is blank, over 31 characters, contains `* ? : \ / [ ]`, begins or ends with an apostrophe, or duplicates another (case-insensitive). | Rename to a unique 1–31 character label without the forbidden characters. |
 | both form tools | `invalid_source` | `ValidationError` | Neither source variant was supplied, or both were. | Provide exactly one base64-or-URL source. |
 | both form tools | `not_a_form` | `ValidationError` | The source PDF has no AcroForm fields. | Confirm the PDF is a fillable form. |
-| both form tools | `source_unfetchable` | `ServiceUnavailable` | The URL is blocked or did not return a fetchable PDF. | Verify public https and PDF content type, or use base64. |
+| both form tools | `source_unfetchable` | `ServiceUnavailable` | The URL is blocked or did not return a fetchable PDF. | Use public HTTPS serving application/pdf or application/octet-stream with bytes starting with %PDF-, or use base64. |
 | both form tools | `invalid_pdf_source` | `ValidationError` | The source is malformed base64 or invalid PDF bytes. | Re-encode and verify the PDF. |
+| `docgen_fill_form` | `invalid_field_value` | `ValidationError` | One or more assignments exceed a text constraint, cannot render in their widget, name an unsupported field type, or do not resolve to a radio/list option. | Inspect `docgen_list_form_fields` and correct every reported assignment; no document was stored. |
 | `docgen_list_form_fields` | `render_timeout` | `Timeout` | Inspection exceeded the configured deadline. | Use a smaller or simpler PDF and retry. |
 | `docgen_get_document` | `document_expired` | `NotFound` | No stored document for that id — expired past TTL, or never existed. | Re-render with the originating `render/export/fill` tool; ids are not reusable across renders. |
 
@@ -371,7 +367,7 @@ docgen's named semantic, fetch and timeout reasons are declared inline for recov
 `errors[]` (per-tool locality — no shared constant), even though the `when`/`recovery` text is
 identical.
 
-Semantic errors use `ValidationError` (-32007); malformed tool arguments remain `InvalidParams` (-32602). Rejection rules and recovery hints are unchanged.
+Semantic errors use `ValidationError` (-32007); malformed tool arguments use `InvalidParams` (-32602). Field validation preserves values that pdf-lib can store without a widget and the text preparation its widget renderers support; unrelated PDF/template failures are not classified as invalid caller values.
 
 **SSRF guard spec** (shared by both form tools' `sourcePdf.url` fetch path):
 
@@ -379,7 +375,7 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
 - Destination IP must not be in RFC 1918 private ranges (`10.0.0.0/8`, `172.16.0.0/12`,
   `192.168.0.0/16`), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or `::1`.
   Every resolved candidate is checked at each hop, with equivalent IPv6 forms normalized and the full IPv6 link-local range covered. A fresh HTTPS socket connects only to a vetted address, preserving original TLS identity, SNI and HTTP Host.
-- Response `Content-Type` must be `application/pdf` (checked before buffering the body).
+- Response `Content-Type` is checked before reading the body: `application/pdf` is accepted; `application/octet-stream` is accepted only when the buffered body begins `%PDF-`. Other types are rejected without consuming the body.
 - Response body is capped at `DOCGEN_MAX_DOCUMENT_BYTES`; an over-limit response is rejected
   before the full body is read.
 - Redirects are followed up to a fixed limit (3); a redirect to a private IP triggers the same
@@ -392,20 +388,20 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
 ## Output Design Notes
 
 - **Dual-surface metadata.** The `DocumentEnvelope` fields all live in `output`, so
-  `format-parity` drags them into both `structuredContent` and the `format()` markdown twin
-  automatically — every client sees `documentId`, `resourceUri`, size, TTL, and the inline
+  the formatter renders them in both `structuredContent` and `content[]` — every client sees `documentId`, `resourceUri`, size, TTL, and the inline
   base64 (or its absence note when over the ceiling). `downloadUrl` is reserved and not emitted
   in v1, so `format()` always renders its absence note. The block leads with an action-specific
   sentence ("Rendered a 3-page PDF (142 KB).") followed by the labeled fields.
 - **Inline vs. link by size.** `inlineBase64` is populated only when `byteSize ≤
   DOCGEN_INLINE_MAX_BYTES`; above that the field is omitted and `format()` states the doc is
-  available via the resource/URL. This keeps a 20 MB workbook from being base64-inlined into a
+  available via the document resource. This keeps a 20 MB workbook from being base64-inlined into a
   tool result. The bytes never ride as a `ctx.content` media block — that helper is
   image/audio only, so arbitrary document bytes go inline-in-`output` (small) or via the
   resource `blob` (always).
 - **`unmatchedFields[]`** (fill_form) communicates partial application: the form was filled
   with what matched, and the agent is told which field names didn't land — it can correct and
   re-render rather than assuming a clean fill.
+- **`resolvedFields[]` and `madeEditableFields[]`** disclose name resolution and dropdown changes. The latter records the transition before flattening; a notice names the custom value. Unknown checkbox assignments also carry a notice. These fields and notices appear on both output surfaces.
 - **No truncation / no spill.** A document is one opaque artifact, not a row collection, so
   there is no DataCanvas spill and no list truncation — the "large result" axis here is *byte
   size of one blob*, handled by the inline-vs-link threshold above, not by paging.
@@ -418,6 +414,8 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
 
 ## Design Decisions
 
+- **Preserve custom dropdown text.** Case-insensitive normalization applies to finite radio/list choices only. Dropdowns already accept literal custom text, so normalizing it would change a valid stored value and hide an editability transition.
+- **Exact assignments precede aliases.** Resolve aliases from the full field inventory and leave collisions unmatched. Input ordering must never let a guessed alias overwrite an exact assignment.
 - **Three `render/export/fill` tools, not one `mode`-switched tool.** idea.md floated a single
   `convert(mode: 'pdf' | 'xlsx' | 'fill')`. The inputs diverge too far — content vs. tabular
   rows vs. source-PDF + field map share almost no schema — so a mode switch would force a
@@ -455,9 +453,9 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
 - **`openWorldHint: false` even for `fill_form` with a URL.** The URL is a caller-named,
   validated input fetched once (behind an SSRF guard), not open-world API discovery — the
   hint reflects that the tool's *behavior* is deterministic given its inputs.
-- **Resources kept (one), prompts dropped (zero).** The document-by-id resource is the
-  canonical stable-URI artifact delivery and pairs naturally with `docgen_get_document` for
-  tool-only clients. No prompt earns its place in an action-only surface.
+- **Document delivery and workflow resources.** The document-by-id template provides raw
+  artifact bytes, including those above the inline limit. The published `docgen-guide`
+  skill teaches review of the saved PDF before flattening. No prompt is registered.
 
 ---
 
@@ -472,10 +470,7 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
   lightweight engine has a far smaller attack surface than a real browser (no JS execution, no
   network fetches from the document), but the `security-pass` step must confirm no
   remote-resource fetch, no local-file access, and no script execution from document content.
-- **Form-fetch SSRF surface.** `docgen_fill_form` with `sourcePdf.url` fetches a
-  caller-named URL. This needs an SSRF guard (block private/loopback/link-local ranges,
-  require `https`, cap response size, verify `application/pdf`) before it ships — tracked into
-  the `security-pass` step. Base64 input avoids the fetch entirely.
+- **Form-fetch SSRF surface.** Both form tools fetch caller-named URL sources through the guard: public HTTPS destinations, vetted connections at every redirect, MIME checks and a byte ceiling. Generic binary responses also require a `%PDF-` prefix. Base64 input avoids the fetch entirely.
 - **AcroForm only, no XFA.** Form fill targets standard AcroForm fields. XFA-based forms
   (some government PDFs) are not supported by `pdf-lib`; `not_a_form` fires when no fillable
   AcroForm is present. XFA-only PDFs also trigger `not_a_form` — there is no distinction
@@ -503,7 +498,8 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments remain 
 - `docgen_list_form_fields` (read-only AcroForm inventory; same base64 and URL source)
 - `docgen_get_document` (re-fetch by id)
 - `docgen://document/{documentId}` resource (blob + metadata)
-- Shared `DocumentEnvelope`; dual delivery (resource/URL + inline base64)
+- `skill://docgen-guide/SKILL.md` resource and Skills extension discovery
+- Shared `DocumentEnvelope`; dual delivery (document resource + inline base64)
 - Tenant-scoped, TTL-bounded storage (`DocumentStore` over `ctx.state` + storage provider)
 - Render bounds (`DOCGEN_MAX_DOCUMENT_BYTES`, `DOCGEN_RENDER_TIMEOUT_MS`) and the typed error
   contract

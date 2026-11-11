@@ -2,10 +2,10 @@
 
 **Server:** docgen-mcp-server
 **Version:** 0.3.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
-**Zod:** ^4.6.5
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
+**Zod:** ^4.6.7
 
 > **Read the framework docs first:** `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` contains the full API reference — builders, Context, error codes, exports, patterns. This file covers server-specific conventions only.
 
@@ -21,16 +21,18 @@ docgen-mcp-server renders structured agent content into downloadable binary docu
 |:-----------|:-----|:-------------|
 | `docgen_render_pdf` | tool | HTML / markdown / `{{template}}+data` → PDF (lightweight pdf-lib engine). Sets `degraded` for dropped styling or character replacement on any text surface; smart-punctuation transliteration alone remains non-degraded. |
 | `docgen_export_spreadsheet` | tool | One or more named row sheets → `.xlsx` (exceljs), with an optional per-column type/format spec. |
-| `docgen_fill_form` | tool | Fill (and optionally flatten) the AcroForm fields of a supplied PDF — source as `{ base64 }` or an `{ url }` fetched behind an SSRF guard. Unmatched field names come back in `unmatchedFields[]`. |
-| `docgen_list_form_fields` | tool | Read-only field discovery from the same source: `{ fields: [{ name, type, required, options? }] }`. Types: text, checkbox, dropdown, optionList, radioGroup, signature, button. Only choice fields include options; signatures/buttons are discovery only. No PDF modification or document storage. |
+| `docgen_fill_form` | tool | Fill (and optionally flatten) AcroForm fields from `{ base64 }` or an SSRF-guarded `{ url }`. Reports unmatched names, resolved aliases, checkbox notices, and dropdowns made editable; invalid assignments fail together as `invalid_field_value`. |
+| `docgen_list_form_fields` | tool | Read-only field discovery: names, types, required flags, choices, stored values, and available labels, length limits, checkbox on-states and first-widget pages. Types: text, checkbox, dropdown, optionList, radioGroup, signature, button. Signatures/buttons are discovery only. No PDF modification or document storage. |
 | `docgen_get_document` | tool | Re-fetch a previously rendered document by its `documentId`. Pure read; `document_expired` once the TTL lapses. |
 | `docgen://document/{documentId}` | resource | The stable-URI delivery surface — a byte blob (real mime type) + a JSON metadata block. |
+| `skill://docgen-guide/SKILL.md` | resource | Published guide for inspecting, filling, reviewing and flattening PDFs, also available through the Skills extension. |
 
 **Services (`src/services/document/`):**
 
 - `render-service.ts` — the bundled rendering stack (PDF, xlsx, form-fill); enforces the byte ceiling + per-render timeout and classifies failures into the typed reasons the tools declare.
 - `document-store.ts` — mints opaque ids, persists bytes + metadata via tenant-scoped `ctx.state` under a shared TTL, builds the envelope. A leaked id never crosses the tenant boundary.
-- `fetch-guard.ts` — HTTPS PDF fetcher shared by both form tools. Vets all resolved addresses at every redirect hop, connects only to a vetted address using a fresh socket with TLS identity and Host preserved, blocks private/loopback/link-local/metadata destinations, enforces PDF content type, byte cap, deadline and cancellation. Failures are leak-free `source_unfetchable` errors.
+- `fetch-guard.ts` — HTTPS PDF fetcher shared by both form tools. Vets all resolved addresses at every redirect hop, tries vetted addresses with bounded TCP fallback, preserves TLS identity and Host, and blocks private/loopback/link-local/metadata destinations. Accepts PDF content type or octet-stream bodies starting with `%PDF-`; enforces byte cap, deadline and cancellation. Failures are leak-free `source_unfetchable` errors.
+- `form-assignments.ts` / `form-inventory.ts` — AcroForm name resolution, assignment validation and read-only field metadata.
 - `source-pdf.ts` — shared source-pair validation, base64 decoding and guarded URL resolution.
 - `html-blocks.ts` — reduces HTML/markdown to a linear block model for the lightweight engine (no JS execution, no remote-resource fetch); flags `degraded` for anything it can't render.
 - `format-envelope.ts` / `types.ts` / `render-types.ts` — the shared `DocumentEnvelope` formatter, domain types, and render-input schemas.
@@ -254,7 +256,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-docgen semantic reasons use `ValidationError` (`-32007`): empty_workbook, invalid_source, invalid_sheet_name, invalid_pdf_source, not_a_form, template_render_failed, document_too_large. Schema failures stay `InvalidParams` (`-32602`); fetch, timeout and missing-document codes remain unchanged.
+docgen semantic reasons use `ValidationError` (`-32007`): empty_workbook, invalid_source, invalid_sheet_name, invalid_pdf_source, not_a_form, invalid_field_value, template_render_failed, document_too_large. Schema failures stay `InvalidParams` (`-32602`); fetch, timeout and missing-document codes remain unchanged.
 
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)`. Production tool calls fill `data.recovery.hint` from the matching declared reason when the throw has no hint; both `structuredContent` and `content[]` carry it. Explicit hints override the contract. `recovery` is required (≥ 5 words, lint-validated). Tool error envelopes carry `data.requestId`, and tool error text closes with the request id. Resource parameter rejections (`-32602`) preserve `data: { uri }`; generic protocol errors need not carry a request id. Direct handler calls bypass the tool hint fill, so service and resource tests that assert a hint directly retain `ctx.recoveryFor`. Mark service-thrown entries `thrownBy: 'service'` so `error-contract-unthrown` skips them; docgen's render and fetch services use this pattern. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) need no declaration.
 
@@ -308,6 +310,8 @@ src/
       render-service.ts                 # Bundled render stack (PDF, xlsx, form-fill); byte ceiling + timeout
       document-store.ts                 # Tenant-scoped, TTL-bounded artifact store; mints ids, builds the envelope
       fetch-guard.ts                    # SSRF-guarded PDF fetcher for the fill_form url source
+      form-assignments.ts               # Field-name resolution and aggregate assignment validation
+      form-inventory.ts                 # Read-only AcroForm constraints and stored values
       html-blocks.ts                    # HTML/markdown → linear block model for the lightweight engine
       format-envelope.ts                # Shared DocumentEnvelope formatter
       render-types.ts                   # Render-input Zod schemas
@@ -339,9 +343,11 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Development skills live in `framework-skills/`. Read the matching skill directly, such as `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the registry.
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+Published skills live in root `skills/` and teach tool workflows to agents using the server. Plugin installs, the npm package, Docker, and the MCPB carry this tree. `createApp({ skills: 'skills' })` also serves it to MCP clients. Author and validate published skills with `framework-skills/add-skill/SKILL.md`.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your development agent discovers (Claude Code: `.claude/skills/`, others: equivalent). The `maintenance` skill re-syncs these copies after framework updates.
 
 Available skills:
 
@@ -353,6 +359,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author and validate a published skill in root `skills/` |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -400,7 +407,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Check env-var parity, `.mcpbignore` coverage, plugin manifests and published skills |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -419,7 +426,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings. MCPB is stdio-only — HTTP deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a stdio `.mcpb` extension for Claude Desktop. List build-only and local files in `.mcpbignore` with root-anchored patterns such as `/docs/`. Root `skills/` ships in the bundle. After packing, `scripts/clean-mcpb.ts` prunes dev dependencies, agent docs at dependency roots, platform-specific native bindings, node-gyp build metadata and framework build files. Nested runtime `skills/` modules stay in the bundle.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -486,6 +493,8 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] Keep the root Agent Plugins manifests `plugin.json` and `mcp.json` aligned with package metadata and the fixed stdio environment. Keep user-supplied values in the existing Claude and Codex overlays.
+- [ ] Validate any published `skills/` tree with `lint:packaging` and field-test its workflows.
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`

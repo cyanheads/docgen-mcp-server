@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/docgen-mcp-server</h1>
   <p><b>Render HTML/markdown to PDF, export rows to xlsx, and fill AcroForm PDFs via MCP. STDIO or Streamable HTTP.</b>
-  <div>5 Tools • 1 Resource</div>
+  <div>5 Tools • 1 Document Resource • 1 Skill</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/docgen-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/docgen-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/docgen-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -32,7 +32,7 @@ Generate documents from an agent: render HTML, markdown, or template data to PDF
 | `docgen_render_pdf` | Render HTML, markdown, or a `{{key}}` template + data object to a downloadable PDF |
 | `docgen_export_spreadsheet` | Render one or more named worksheets of row objects to a downloadable `.xlsx` workbook |
 | `docgen_fill_form` | Fill the AcroForm fields of a supplied PDF (base64 or https URL) and optionally flatten it |
-| `docgen_list_form_fields` | Inspect exact AcroForm field names, types, required flags and choice options without changing the PDF |
+| `docgen_list_form_fields` | Inspect AcroForm names, values, constraints, choice options and widget pages without changing the PDF |
 | `docgen_get_document` | Re-fetch a previously rendered document by the id a render/export/fill tool returned |
 
 ### Resources
@@ -41,7 +41,11 @@ Generate documents from an agent: render HTML, markdown, or template data to PDF
 |:---|:---|
 | `docgen://document/{documentId}` | A rendered document by id — raw bytes as a blob plus a JSON metadata block |
 
-All document data is also reachable via the tool surface — `docgen_get_document` is the tool-only twin of this resource.
+`docgen_get_document` retrieves the delivery envelope. Read the resource for bytes when the envelope omits inline base64.
+
+### Skill
+
+[`docgen-guide`](./skills/docgen-guide/SKILL.md) walks through inspecting, filling, verifying, and flattening an AcroForm PDF. It is available to plugin hosts and MCP clients that support the Skills extension.
 
 ## Capability reference
 
@@ -63,18 +67,20 @@ All document data is also reachable via the tool surface — `docgen_get_documen
 
 ### `docgen_fill_form` <sub>tool</sub>
 
-- Provide exactly one `sourcePdf`: `{ base64 }` or `{ url }` (public https serving `application/pdf`), plus `fields` mapping exact, case-sensitive AcroForm field names to values. Flat or XFA-only PDFs return `not_a_form`.
-- Obtain exact names and choice options with `docgen_list_form_fields` before filling an unfamiliar PDF.
-- Returns a `DocumentEnvelope` with `pageCount` and `unmatchedFields[]` for names with no matching field.
+- Provide exactly one `sourcePdf`: `{ base64 }` or `{ url }` (public HTTPS serving `application/pdf`, or `application/octet-stream` whose bytes start with `%PDF-`), plus a `fields` map. Flat or XFA-only PDFs return `not_a_form`.
+- Inspect unfamiliar PDFs with `docgen_list_form_fields`. Exact names take precedence across the whole map; a unique last segment or case-insensitive full name also works. Ambiguous or conflicting aliases remain unmatched.
+- Returns a `DocumentEnvelope` with `pageCount`, `unmatchedFields[]`, `resolvedFields[]` for accepted aliases, and `madeEditableFields[]` for dropdowns made editable by custom text. The accompanying notices disclose custom dropdown values and unrecognized checkbox values.
+- Checkboxes accept booleans, common checked/unchecked strings and their PDF export value. Radios and option lists accept an exact option or a unique case-insensitive match. Dropdown custom text is preserved verbatim.
+- Invalid assignments are reported together as `invalid_field_value`, with field constraints and a recovery hint; no document is stored on failure.
 - `flatten: true` makes the filled values non-editable (default `false`).
 
 ---
 
 ### `docgen_list_form_fields` <sub>tool</sub>
 
-- Accepts the same `sourcePdf` base64-or-URL source as `docgen_fill_form`. Returns `{ fields: [{ name, type, required, options? }] }` without modifying the PDF or storing a document.
+- Accepts the same `sourcePdf` base64-or-URL source as `docgen_fill_form`. Returns `{ fields: [{ name, type, required, options?, label?, maxLength?, onValue?, value?, page? }] }` without modifying the PDF or storing a document.
 - Types: `text`, `checkbox`, `dropdown`, `optionList`, `radioGroup`, `signature`, `button`. Only dropdown, optionList and radioGroup entries include `options`; signatures and buttons are discovery only.
-- Nested names retain their exact paths. PDFs without AcroForm fields return `not_a_form`.
+- Optional metadata reflects the PDF: tooltip, text length limit, checkbox export value, current value and the first widget's 1-based page. Missing metadata is omitted; unchecked boxes and empty selections remain `false` and `[]`. Nested names retain their exact paths. PDFs without AcroForm fields return `not_a_form`.
 
 ---
 
@@ -96,7 +102,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 docgen-specific:
 
-- No external API — a bundled rendering stack (`pdf-lib`, `exceljs`, `marked`), so renders are local and deterministic with no upstream to fail
+- Bundled rendering stack (`pdf-lib`, `exceljs`, `marked`); only caller-supplied URL sources require a network fetch
 - One shared `DocumentEnvelope` across the four document delivery tools; field inspection returns its inventory directly
 - Bounded renders — a byte ceiling (`DOCGEN_MAX_DOCUMENT_BYTES`) and a timeout (`DOCGEN_RENDER_TIMEOUT_MS`) turn a runaway render into a typed error instead of a hang
 - Tenant-scoped, expiring storage — a document id resolves only for the tenant that created it, and documents expire rather than accumulate
@@ -106,7 +112,7 @@ Agent-friendly output:
 
 - Dual-surface delivery — every envelope field appears in both `structuredContent` and the markdown output, including the `documentId`, resource URI, size, and TTL
 - Inline by size — `inlineBase64` is populated only at or under `DOCGEN_INLINE_MAX_BYTES`; larger documents are delivered through the resource URI
-- Partial-fill reporting — `docgen_fill_form` returns `unmatchedFields[]` so the agent sees which field names didn't match
+- Fill reporting — unmatched names, resolved aliases and dropdown editability changes are visible on both output surfaces
 - Typed errors with recovery hints (`invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`, `not_a_form`, `source_unfetchable`, `document_expired`, …); semantic validation uses `ValidationError` (`-32007`) and malformed arguments `InvalidParams` (`-32602`)
 
 ## Getting started
@@ -176,7 +182,7 @@ Documents are delivered by the `docgen://document/{id}` resource (and inline bas
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+); development uses Bun v1.4.3.
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+). Development uses Bun v1.4.4.
 
 ### Installation
 
@@ -231,6 +237,8 @@ All configuration is optional — docgen runs with no required environment varia
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 > The default in-memory storage drops every document on restart, and earlier ids then return `document_expired`. To keep documents across restarts, point `STORAGE_PROVIDER_TYPE` at a persistent backend.
+
+When upgrading a filesystem store from mcp-ts-core 0.13.21 or earlier, the first start copies existing data into `_v2/` under `STORAGE_FILESYSTEM_PATH`. Allow room for both copies and upgrade every instance sharing the path before resuming writes.
 
 ## Running the server
 
