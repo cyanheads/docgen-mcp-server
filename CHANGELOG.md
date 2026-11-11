@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-11
+
+Inspect and review PDF form fills, follow the published workflow, and fetch PDFs from more HTTPS sources.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-10-13 · ⚠️ Breaking · 🛡️ Security
 
 Discover PDF form fields and preserve document values, text and HTTPS destination boundaries.
