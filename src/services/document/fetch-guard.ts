@@ -4,8 +4,9 @@
  * destinations by resolving DNS and checking the resolved IP (not just the
  * hostname), binds a fresh HTTPS connection to a vetted address with TLS identity
  * preserved, and follows redirects while re-validating each hop,
- * verifies `application/pdf`, and caps the response body at the configured byte
- * ceiling before buffering. Every failure path — including a raw network
+ * accepts `application/pdf` and PDF-signature `application/octet-stream` bodies,
+ * and caps the response body at the configured byte ceiling before buffering.
+ * Every failure path — including a raw network
  * rejection or a status-mapped framework `McpError` whose `data` carries upstream
  * internals (statusCode, responseBody, requestId, the request URL) — is caught and
  * re-thrown as a clean `source_unfetchable` domain error so none of those internals
@@ -21,7 +22,17 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { McpError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 
 const MAX_REDIRECTS = 3;
+const CONNECT_STAGGER_MS = 1000;
 const FETCH_REASON = 'source_unfetchable';
+const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+const RETRYABLE_CONNECT_CODES = new Set([
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+]);
+
+type VettedAddress = { address: string; family: number };
 
 /**
  * True for an error this guard itself raised — its `data.reason` is already the
@@ -120,7 +131,7 @@ async function assertHostAllowed(
   hostname: string,
   ctx: Context,
   signal: AbortSignal,
-): Promise<{ address: string; family: number }> {
+): Promise<VettedAddress[]> {
   const fail = (detail: string) =>
     serviceUnavailable(`Refusing to fetch ${hostname}: ${detail}`, {
       reason: FETCH_REASON,
@@ -129,10 +140,10 @@ async function assertHostAllowed(
 
   if (isIP(hostname)) {
     if (isBlockedIp(hostname)) throw fail('destination IP is private, loopback, or link-local');
-    return { address: hostname, family: isIP(hostname) };
+    return [{ address: hostname, family: isIP(hostname) }];
   }
 
-  let addresses: { address: string; family: number }[];
+  let addresses: VettedAddress[];
   let onAbort: (() => void) | undefined;
   try {
     addresses = await Promise.race([
@@ -149,12 +160,23 @@ async function assertHostAllowed(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-  const [approved] = addresses;
-  if (!approved) throw fail('DNS resolved to no addresses');
-  for (const { address } of addresses) {
-    if (isBlockedIp(address)) throw fail('resolves to a private, loopback, or link-local address');
+  const [first] = addresses;
+  if (!first) throw fail('DNS resolved to no addresses');
+  const primary: VettedAddress[] = [];
+  const alternate: VettedAddress[] = [];
+  for (const candidate of addresses) {
+    if (isBlockedIp(candidate.address))
+      throw fail('resolves to a private, loopback, or link-local address');
+    (candidate.family === first.family ? primary : alternate).push(candidate);
   }
-  return approved;
+  const ordered: VettedAddress[] = [];
+  for (let i = 0; i < Math.max(primary.length, alternate.length); i++) {
+    const primaryAddress = primary[i];
+    const alternateAddress = alternate[i];
+    if (primaryAddress) ordered.push(primaryAddress);
+    if (alternateAddress) ordered.push(alternateAddress);
+  }
+  return ordered;
 }
 
 /**
@@ -164,8 +186,9 @@ async function assertHostAllowed(
  */
 export function requestPdfAtAddress(
   url: URL,
-  approved: { address: string; family: number },
+  approved: VettedAddress,
   signal: AbortSignal,
+  onConnected: () => void = () => {},
 ): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     signal.throwIfAborted();
@@ -178,8 +201,99 @@ export function requestPdfAtAddress(
       lookup: (_hostname, _options, callback) => callback(null, approved.address, approved.family),
     };
     const req = request(url, options, resolve);
+    req.once('socket', (socket) => {
+      // A refused Bun socket can already have connecting=false at this point.
+      if (socket.remoteAddress) onConnected();
+      else socket.once('connect', onConnected);
+    });
     req.once('error', reject);
     req.end();
+  });
+}
+
+/** Only TCP establishment can advance to another vetted DNS answer. */
+function requestPdf(
+  url: URL,
+  addresses: VettedAddress[],
+  signal: AbortSignal,
+  staggerMs: number,
+): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    const pending = new Set<AbortController>();
+    let cursor = 0;
+    let stagger: ReturnType<typeof setTimeout> | undefined;
+    let winner: AbortController | undefined;
+
+    function keepOnly(attempt?: AbortController) {
+      clearTimeout(stagger);
+      for (const other of pending) {
+        if (other === attempt) continue;
+        pending.delete(other);
+        other.abort();
+      }
+    }
+
+    function dial() {
+      const address = addresses[cursor];
+      if (!address || signal.aborted) return;
+      const position = ++cursor;
+      const attempt = new AbortController();
+      pending.add(attempt);
+      const onConnected = () => {
+        if (winner || !pending.has(attempt)) return;
+        winner = attempt;
+        keepOnly(attempt);
+      };
+
+      requestPdfAtAddress(
+        url,
+        address,
+        AbortSignal.any([signal, attempt.signal]),
+        onConnected,
+      ).then(
+        (response) => {
+          onConnected();
+          if (winner === attempt) resolve(response);
+          else response.destroy();
+        },
+        (error: unknown) => {
+          if (!pending.delete(attempt)) return;
+          const retryable =
+            error instanceof Error &&
+            'syscall' in error &&
+            error.syscall === 'connect' &&
+            'code' in error &&
+            typeof error.code === 'string' &&
+            RETRYABLE_CONNECT_CODES.has(error.code);
+          if (signal.aborted || winner || !retryable) {
+            keepOnly();
+            reject(error);
+          } else if (cursor < addresses.length) {
+            if (position === cursor) {
+              clearTimeout(stagger);
+              dial();
+            }
+          } else if (!pending.size) {
+            reject(error);
+          }
+        },
+      );
+
+      // Keep the oldest pending dial eligible. Rotate the fallback slot on a
+      // TCP timeout so a large DNS answer cannot create an unbounded race.
+      if (!winner && cursor < addresses.length) {
+        stagger = setTimeout(() => {
+          if (pending.size === 2) {
+            pending.delete(attempt);
+            attempt.abort();
+          }
+          dial();
+        }, staggerMs);
+      }
+    }
+
+    signal.throwIfAborted();
+    dial();
   });
 }
 
@@ -212,6 +326,7 @@ export async function fetchPdfGuarded(
     timedOut = true;
     controller.abort();
   }, timeoutMs);
+  const staggerMs = Math.min(CONNECT_STAGGER_MS, timeoutMs / 2);
 
   try {
     if (ctx.signal.aborted) {
@@ -230,9 +345,8 @@ export async function fetchPdfGuarded(
       if (parsed.protocol !== 'https:') throw fail('only https URLs are allowed');
 
       const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
-      const approved = await assertHostAllowed(hostname, ctx, controller.signal);
-      controller.signal.throwIfAborted();
-      const response = await requestPdfAtAddress(parsed, approved, controller.signal);
+      const addresses = await assertHostAllowed(hostname, ctx, controller.signal);
+      const response = await requestPdf(parsed, addresses, controller.signal, staggerMs);
       try {
         // Follow redirects manually so each hop is re-validated by the guard.
         const status = response.statusCode ?? 0;
@@ -247,8 +361,12 @@ export async function fetchPdfGuarded(
         if (status < 200 || status >= 300) throw fail(`the server returned HTTP ${status}`);
 
         const contentType = response.headers['content-type'] ?? '';
-        if (!/^application\/pdf\b/i.test(contentType)) {
-          throw fail(`expected application/pdf but got "${contentType || 'no content-type'}"`);
+        const isPdf = /^application\/pdf\b/i.test(contentType);
+        const isOctetStream = !isPdf && /^application\/octet-stream\s*(?:;|$)/i.test(contentType);
+        if (!isPdf && !isOctetStream) {
+          throw fail(
+            `expected application/pdf or application/octet-stream but got "${contentType || 'no content-type'}"`,
+          );
         }
 
         const declaredLength = Number(response.headers['content-length']);
@@ -256,7 +374,8 @@ export async function fetchPdfGuarded(
           throw fail(`the response is ${declaredLength} bytes, over the ${maxBytes}-byte limit`);
         }
 
-        const bytes = await readBodyCapped(response, maxBytes, fail);
+        const bytes = await readBodyCapped(response, maxBytes, isOctetStream, fail);
+        controller.signal.throwIfAborted();
         ctx.log.info('Fetched source PDF', {
           host: parsed.hostname,
           byteSize: bytes.byteLength,
@@ -306,18 +425,28 @@ export async function fetchPdfGuarded(
 async function readBodyCapped(
   response: IncomingMessage,
   maxBytes: number,
+  requireSignature: boolean,
   fail: (detail: string) => Error,
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const invalidSignature = () =>
+    fail('application/octet-stream did not start with the %PDF- signature');
   for await (const value of response) {
-    total += value.byteLength;
-    if (total > maxBytes) {
+    const nextTotal = total + value.byteLength;
+    if (nextTotal > maxBytes) {
       response.destroy();
       throw fail(`the response exceeds the ${maxBytes}-byte limit`);
     }
+    if (requireSignature) {
+      for (let offset = total; offset < Math.min(nextTotal, PDF_SIGNATURE.length); offset++) {
+        if (value[offset - total] !== PDF_SIGNATURE[offset]) throw invalidSignature();
+      }
+    }
+    total = nextTotal;
     chunks.push(value);
   }
+  if (requireSignature && total < PDF_SIGNATURE.length) throw invalidSignature();
 
   const out = new Uint8Array(total);
   let offset = 0;

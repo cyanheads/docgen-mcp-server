@@ -8,7 +8,7 @@
 
 import { lookup } from 'node:dns/promises';
 import { EventEmitter } from 'node:events';
-import { request } from 'node:https';
+import { type RequestOptions, request } from 'node:https';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -242,6 +242,59 @@ describe('fetchPdfGuarded response handling (stubbed fetch)', () => {
     await expect(fetchPdfGuarded(PUBLIC, 1_000_000, 5000, ctx)).resolves.toBeDefined();
   });
 
+  it('passes application/pdf bytes through for the PDF parser to validate', async () => {
+    const bytes = Uint8Array.of(1, 2, 3);
+    fetchMock.mockResolvedValueOnce(pdfResponse(bytes));
+    await expect(fetchPdfGuarded(PUBLIC, 1000, 5000, createMockContext())).resolves.toEqual(bytes);
+  });
+
+  it('accepts application/octet-stream with a PDF signature split across chunks', async () => {
+    const bytes = Uint8Array.of(...PDF_BYTES, 0x31);
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(bytes.subarray(0, 2));
+            controller.enqueue(bytes.subarray(2));
+            controller.close();
+          },
+        }),
+        { headers: { 'content-type': 'application/octet-stream; charset=binary' } },
+      ),
+    );
+    await expect(fetchPdfGuarded(PUBLIC, bytes.length, 5000, createMockContext())).resolves.toEqual(
+      bytes,
+    );
+  });
+
+  it.each([Uint8Array.of(), PDF_BYTES.subarray(0, 4), Uint8Array.of(1, 2, 3, 4, 5)])(
+    'rejects application/octet-stream without a complete PDF signature (%j)',
+    async (bytes) => {
+      fetchMock.mockResolvedValueOnce(
+        pdfResponse(bytes, { contentType: 'application/octet-stream' }),
+      );
+      const error = await rejectedMcpError(
+        fetchPdfGuarded(PUBLIC, 1000, 5000, createMockContext()),
+      );
+      expect(error.data).toMatchObject({ reason: 'source_unfetchable' });
+      expect(error.message).toContain('application/octet-stream');
+      expect(error.message).toContain('%PDF-');
+    },
+  );
+
+  it('caps a PDF-signature application/octet-stream body while streaming', async () => {
+    const bytes = Uint8Array.of(...PDF_BYTES, 0x31);
+    fetchMock.mockResolvedValueOnce(
+      pdfResponse(bytes, { contentType: 'application/octet-stream' }),
+    );
+    await expect(
+      fetchPdfGuarded(PUBLIC, PDF_BYTES.length, 5000, createMockContext()),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('exceeds the 5-byte limit'),
+      data: { reason: 'source_unfetchable' },
+    });
+  });
+
   it('rejects a non-PDF content-type before buffering the body', async () => {
     const ctx = createMockContext({ tenantId: 't1' });
     fetchMock.mockResolvedValueOnce(pdfResponse(PDF_BYTES, { contentType: 'text/html' }));
@@ -442,7 +495,7 @@ describe('fetchPdfGuarded DNS resolution (mocked lookup)', () => {
     const destinations: string[] = [];
     vi.mocked(request).mockImplementation(((
       url: URL,
-      options: import('node:https').RequestOptions,
+      options: RequestOptions,
       callback: (response: unknown) => void,
     ) => {
       const req = new EventEmitter();
@@ -515,5 +568,293 @@ describe('fetchPdfGuarded DNS resolution (mocked lookup)', () => {
     await expect(
       fetchPdfGuarded('https://empty.example/form.pdf', 1_000_000, 5000, ctx),
     ).rejects.toMatchObject({ data: { reason: 'source_unfetchable' } });
+  });
+});
+
+describe('fetchPdfGuarded connection attempts', () => {
+  type Outcome =
+    | 'refused'
+    | 'unreachable'
+    | 'stall'
+    | 'headers'
+    | 'tls'
+    | 'html'
+    | 'status'
+    | 'body'
+    | 'body stall'
+    | 'slow'
+    | 'pdf'
+    | { location: string };
+
+  const url = 'https://example.com/form.pdf';
+  const addresses = [
+    { address: '2606:4700:4700::1111', family: 6 },
+    { address: '2606:4700:4700::1001', family: 6 },
+    { address: '1.1.1.1', family: 4 },
+    { address: '1.0.0.1', family: 4 },
+  ];
+  let attempts: string[];
+  let cancelled: string[];
+  let consumed: number;
+
+  beforeEach(() => {
+    attempts = [];
+    cancelled = [];
+    consumed = 0;
+    vi.mocked(lookup)
+      .mockReset()
+      .mockResolvedValue(addresses as never);
+    vi.mocked(request).mockClear();
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  function mockConnections(...outcomes: Outcome[]) {
+    vi.mocked(request).mockImplementation(((
+      target: URL,
+      options: RequestOptions & { signal: AbortSignal },
+      respond: (response: unknown) => void,
+    ) => {
+      const req = new EventEmitter();
+      const socket = Object.assign(new EventEmitter(), { connecting: true });
+      return Object.assign(req, {
+        end() {
+          options.lookup?.(target.hostname, {}, (_error, address) => {
+            const destination = `${target.hostname} ${address}`;
+            attempts.push(destination);
+            const onAbort = () => {
+              cancelled.push(destination);
+              fail(options.signal.reason);
+            };
+            const fail = (error: Error) => {
+              options.signal.removeEventListener('abort', onAbort);
+              req.emit('error', error);
+            };
+            const response = (result: unknown) => {
+              options.signal.removeEventListener('abort', onAbort);
+              respond(result);
+            };
+            options.signal.addEventListener('abort', onAbort, { once: true });
+            const outcome = outcomes.shift();
+            if (outcome === 'refused' || outcome === 'unreachable') {
+              // Bun may hand the request a closed socket after a synchronous refusal.
+              socket.connecting = false;
+              req.emit('socket', socket);
+              fail(
+                Object.assign(new Error('private network diagnostic'), {
+                  code: outcome === 'refused' ? 'ECONNREFUSED' : 'ENETUNREACH',
+                  syscall: 'connect',
+                }),
+              );
+              return;
+            }
+            req.emit('socket', socket);
+            if (outcome === 'stall') return;
+            const connect = () => {
+              if (options.signal.aborted) return;
+              socket.connecting = false;
+              socket.emit('connect');
+              if (outcome === 'headers') return;
+              if (outcome === 'tls') {
+                fail(
+                  Object.assign(new Error('TLS rejected the peer'), { code: 'CERT_HAS_EXPIRED' }),
+                );
+                return;
+              }
+              if (typeof outcome === 'object') {
+                response({
+                  statusCode: 302,
+                  headers: { location: outcome.location },
+                  destroy() {},
+                });
+                return;
+              }
+              response({
+                statusCode: outcome === 'status' ? 503 : 200,
+                headers: { 'content-type': outcome === 'html' ? 'text/html' : 'application/pdf' },
+                destroy() {},
+                async *[Symbol.asyncIterator]() {
+                  consumed++;
+                  if (outcome === 'body') {
+                    throw Object.assign(new Error('Response body reset'), { code: 'ECONNRESET' });
+                  }
+                  if (outcome === 'body stall') {
+                    await new Promise<never>((_resolve, reject) => {
+                      const abortBody = () => reject(options.signal.reason);
+                      options.signal.addEventListener('abort', abortBody, { once: true });
+                    });
+                  }
+                  yield PDF_BYTES;
+                },
+              });
+            };
+            if (outcome === 'slow') setTimeout(connect, 1500);
+            else connect();
+          });
+        },
+      });
+    }) as typeof request);
+  }
+
+  it.each(['tls', 'html', 'status', 'body'] as const)(
+    'ends at the first address after %s failure',
+    async (outcome) => {
+      mockConnections(outcome);
+      await expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).rejects.toMatchObject({
+        data: { reason: 'source_unfetchable' },
+      });
+      expect(attempts).toEqual(['example.com 2606:4700:4700::1111']);
+      expect(consumed).toBe(outcome === 'body' ? 1 : 0);
+    },
+  );
+
+  it('alternates vetted families after connect failures', async () => {
+    mockConnections('refused', 'unreachable', 'refused', 'pdf');
+    await expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).resolves.toEqual(PDF_BYTES);
+    expect(attempts).toEqual([
+      'example.com 2606:4700:4700::1111',
+      'example.com 1.1.1.1',
+      'example.com 2606:4700:4700::1001',
+      'example.com 1.0.0.1',
+    ]);
+    expect(lookup).toHaveBeenCalledOnce();
+  });
+
+  it('starts with IPv4 when it is resolver-first', async () => {
+    vi.mocked(lookup).mockResolvedValue([addresses[2], addresses[3], addresses[0]] as never);
+    mockConnections('refused', 'pdf');
+    await expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).resolves.toEqual(PDF_BYTES);
+    expect(attempts).toEqual(['example.com 1.1.1.1', 'example.com 2606:4700:4700::1111']);
+  });
+
+  it('tries the next address when TCP establishment stalls', async () => {
+    vi.useFakeTimers();
+    mockConnections('stall', 'pdf');
+    const result = expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).resolves.toEqual(
+      PDF_BYTES,
+    );
+    await vi.advanceTimersByTimeAsync(999);
+    expect(attempts).toEqual(['example.com 2606:4700:4700::1111']);
+    await vi.advanceTimersByTimeAsync(1);
+    await result;
+    expect(attempts).toEqual(['example.com 2606:4700:4700::1111', 'example.com 1.1.1.1']);
+    expect(cancelled).toEqual(['example.com 2606:4700:4700::1111']);
+  });
+
+  it.each([true, false])(
+    'lets a slow first address finish (has alternative: %s)',
+    async (hasAlternate) => {
+      vi.useFakeTimers();
+      if (!hasAlternate) vi.mocked(lookup).mockResolvedValue([addresses[0]] as never);
+      mockConnections('slow', 'stall');
+      const result = expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).resolves.toEqual(
+        PDF_BYTES,
+      );
+      await vi.advanceTimersByTimeAsync(1500);
+      await result;
+      expect(attempts).toHaveLength(hasAlternate ? 2 : 1);
+      expect(cancelled).toEqual(hasAlternate ? ['example.com 1.1.1.1'] : []);
+    },
+  );
+
+  it('keeps at most two TCP dials pending as fallback addresses time out', async () => {
+    vi.useFakeTimers();
+    mockConnections('stall', 'stall', 'stall', 'pdf');
+    const result = expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).resolves.toEqual(
+      PDF_BYTES,
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(attempts).toHaveLength(3);
+    expect(cancelled).toEqual(['example.com 1.1.1.1']);
+    await vi.advanceTimersByTimeAsync(1000);
+    await result;
+    expect(attempts).toHaveLength(4);
+    expect(cancelled).toEqual([
+      'example.com 1.1.1.1',
+      'example.com 2606:4700:4700::1001',
+      'example.com 2606:4700:4700::1111',
+    ]);
+  });
+
+  it('uses the original deadline after TCP connects on a later attempt', async () => {
+    vi.useFakeTimers();
+    mockConnections('stall', 'headers', 'pdf');
+    const result = expect(
+      fetchPdfGuarded(url, 1000, 5000, createMockContext()),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('exceeded the time budget'),
+      data: { reason: 'source_unfetchable' },
+    });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(attempts).toEqual(['example.com 2606:4700:4700::1111', 'example.com 1.1.1.1']);
+    await vi.advanceTimersByTimeAsync(1);
+    await result;
+    expect(attempts).toHaveLength(2);
+  });
+
+  it('stops trying addresses when the caller cancels', async () => {
+    vi.useFakeTimers();
+    mockConnections('refused', 'stall', 'pdf');
+    const controller = new AbortController();
+    const ctx = createMockContext({ signal: controller.signal });
+    const result = expect(fetchPdfGuarded(url, 1000, 5000, ctx)).rejects.toMatchObject({
+      message: 'The source PDF fetch was cancelled.',
+      data: { reason: 'source_unfetchable' },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await result;
+    await vi.runAllTimersAsync();
+    expect(attempts).toEqual(['example.com 2606:4700:4700::1111', 'example.com 1.1.1.1']);
+  });
+
+  it('applies the original deadline to a stalled body after a fallback and redirect', async () => {
+    vi.useFakeTimers();
+    mockConnections('stall', { location: 'https://second.example/form.pdf' }, 'body stall');
+    const result = expect(
+      fetchPdfGuarded(url, 1000, 5000, createMockContext()),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('exceeded the time budget'),
+      data: { reason: 'source_unfetchable' },
+    });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(attempts).toHaveLength(3);
+    expect(consumed).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await result;
+    expect(attempts).toHaveLength(3);
+  });
+
+  it('returns a leak-free error after exhausting the vetted addresses', async () => {
+    mockConnections('refused', 'unreachable', 'refused', 'unreachable');
+    const error = await rejectedMcpError(fetchPdfGuarded(url, 1000, 5000, createMockContext()));
+    expect(attempts).toHaveLength(4);
+    expect(error.data).toEqual({ reason: 'source_unfetchable' });
+    expect(error.message).not.toContain('private network diagnostic');
+    expect(error.message).not.toContain('2606:4700');
+  });
+
+  it('retries vetted addresses on redirects and refuses a later mixed DNS answer', async () => {
+    vi.mocked(lookup)
+      .mockResolvedValueOnce(addresses as never)
+      .mockResolvedValueOnce([addresses[2], addresses[0]] as never)
+      .mockResolvedValueOnce([addresses[2], { address: '10.0.0.5', family: 4 }] as never);
+    mockConnections('refused', { location: 'https://second.example/form.pdf' }, 'unreachable', {
+      location: 'https://third.example/form.pdf',
+    });
+    await expect(fetchPdfGuarded(url, 1000, 5000, createMockContext())).rejects.toMatchObject({
+      data: { reason: 'source_unfetchable' },
+    });
+    expect(attempts).toEqual([
+      'example.com 2606:4700:4700::1111',
+      'example.com 1.1.1.1',
+      'second.example 1.1.1.1',
+      'second.example 2606:4700:4700::1111',
+    ]);
+    expect(vi.mocked(lookup).mock.calls.map(([hostname]) => hostname)).toEqual([
+      'example.com',
+      'second.example',
+      'third.example',
+    ]);
   });
 });
