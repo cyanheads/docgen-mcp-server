@@ -5,7 +5,7 @@
 # source code into JavaScript, and prepares the production assets.
 #
 # Pinned to $BUILDPLATFORM rather than the target platform: `bun run build` emits
-# JavaScript, and only `dist/` crosses into the production stage. Built for the target instead, the non-native leg of a
+# JavaScript and copies the published skills. Built for the target instead, the non-native leg of a
 # `--platform linux/amd64,linux/arm64` build runs under QEMU, where bun >= 1.4
 # aborts with a JavaScriptCore allocator assertion and fails the multi-arch push.
 #
@@ -13,7 +13,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS build
 
 WORKDIR /usr/src/app
 
@@ -27,6 +27,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 
 # Copy the rest of the source code
 COPY . .
+RUN mkdir -p skills
 
 # Build the application
 RUN bun run build
@@ -39,7 +40,7 @@ RUN bun run build
 # Cross-install the production tree for the runtime's target OS and architecture.
 # Only node_modules leaves this stage.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS deps
 
 WORKDIR /usr/src/app
 
@@ -73,7 +74,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # ==============================================================================
 # Production Stage — no build-time JavaScript or dependency installs
 # ==============================================================================
-FROM oven/bun:1.4.3-slim AS production
+FROM oven/bun:1.4.4-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -95,6 +96,7 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/skills ./skills
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
