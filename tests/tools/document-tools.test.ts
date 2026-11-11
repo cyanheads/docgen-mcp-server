@@ -224,7 +224,14 @@ describe('docgen_list_form_fields', () => {
     );
     expect(result).toEqual({
       fields: [
-        { name: 'applicant.region', type: 'dropdown', required: true, options: ['west', 'east'] },
+        {
+          name: 'applicant.region',
+          type: 'dropdown',
+          required: true,
+          options: ['west', 'east'],
+          value: [],
+          page: 1,
+        },
       ],
     });
     expect(JSON.parse((listFormFieldsTool.format!(result)[0] as { text: string }).text)).toEqual(
@@ -626,16 +633,27 @@ describe('tool format()', () => {
     const blocks = fillFormTool.format!({
       document: pdfEnvelope,
       unmatchedFields: ['ssn', 'dob'],
+      resolvedFields: [],
+      madeEditableFields: [],
     });
     const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('ssn, dob');
+    expect((blocks[1] as { text: string }).text).toMatch(
+      /"unmatchedFields":\s*\[\s*"ssn",\s*"dob"/,
+    );
     expect(text).toContain(pdfEnvelope.documentId);
   });
 
-  it('fill_form format states none when every field matched', () => {
-    const blocks = fillFormTool.format!({ document: pdfEnvelope, unmatchedFields: [] });
-    const text = (blocks[0] as { text: string }).text;
-    expect(text).toContain('none — every field name matched');
+  it('fill_form format returns empty assignment arrays when no exceptions occurred', () => {
+    const blocks = fillFormTool.format!({
+      document: pdfEnvelope,
+      unmatchedFields: [],
+      resolvedFields: [],
+      madeEditableFields: [],
+    });
+    const text = (blocks[1] as { text: string }).text;
+    expect(text).toContain('"unmatchedFields": []');
+    expect(text).toContain('"resolvedFields": []');
+    expect(text).toContain('"madeEditableFields": []');
   });
 
   it('get_document format labels a PDF vs a spreadsheet by mime type', () => {

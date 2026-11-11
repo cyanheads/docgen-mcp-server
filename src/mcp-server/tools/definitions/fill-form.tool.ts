@@ -2,8 +2,7 @@
  * @fileoverview docgen_fill_form tool — fills the AcroForm fields of a supplied PDF
  * (base64 or an https URL fetched behind an SSRF guard), optionally flattens it,
  * stores the result (tenant-scoped, TTL-bounded), and returns the shared
- * DocumentEnvelope plus the field names that had no match. For tax forms,
- * applications, and templates the human already has.
+ * DocumentEnvelope plus the assignment report.
  * @module mcp-server/tools/definitions/fill-form.tool
  */
 
@@ -19,7 +18,7 @@ import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 export const fillFormTool = tool('docgen_fill_form', {
   title: 'Fill PDF Form',
   description:
-    'Fill the AcroForm fields of a supplied PDF and optionally flatten it. Provide the source PDF as exactly one of { base64 } or { url } (a public https URL serving application/pdf; base64 avoids any fetch), plus a fields map of AcroForm field name → value. Obtain exact case-sensitive names and choice options with docgen_list_form_fields. Signatures and buttons are discovery only. Names with no AcroForm counterpart come back in unmatchedFields[] rather than failing — correct them and re-render. Set flatten to bake the values in so the result is no longer editable. Returns a delivery envelope with a documentId, resource URI, pageCount, and inline base64 when small enough.',
+    'Fill the AcroForm fields of a supplied PDF and optionally flatten it. Provide exactly one of { base64 } or { url } (public HTTPS serving application/pdf, or application/octet-stream when bytes start with %PDF-), plus a fields map of AcroForm field name → value. Use docgen_list_form_fields for exact names, choices and constraints. Signatures and buttons are discovery only. Exact names win over unique aliases, which are reported in resolvedFields[]. Correct any names in unmatchedFields[] and re-render. A custom dropdown value can make a fixed dropdown editable, reported in madeEditableFields[]. Set flatten to bake the values in so the result is no longer editable. Returns a delivery envelope with a documentId, resource URI, pageCount, and inline base64 when small enough.',
   annotations: { readOnlyHint: false, openWorldHint: false },
   input: z.object({
     sourcePdf: SourcePdfSchema,
@@ -36,10 +35,43 @@ export const fillFormTool = tool('docgen_fill_form', {
     unmatchedFields: z
       .array(z.string())
       .describe(
-        'Field names from the input map that had no matching AcroForm field. Empty when every field matched. Correct these and re-render to fill them.',
+        'Unknown, ambiguous or conflicting keys from the input map, in input order. Correct these and re-render to fill them.',
+      ),
+    resolvedFields: z
+      .array(
+        z
+          .object({
+            requested: z.string().describe('Alias as supplied in the input map.'),
+            resolved: z.string().describe('Exact AcroForm name filled by the alias.'),
+          })
+          .describe('One accepted field-name alias.'),
+      )
+      .describe('Accepted field-name aliases in input order. Empty when no alias was used.'),
+    madeEditableFields: z
+      .array(z.string())
+      .describe(
+        'Exact names of fixed dropdowns made editable for custom values, before optional flattening.',
       ),
   }),
+  enrichment: {
+    notices: z
+      .array(z.string())
+      .describe('Warnings for unrecognized checkbox values and dropdowns made editable.'),
+  },
+  enrichmentTrailer: {
+    notices: {
+      render: (notices) => `**Notices**\n\n\`\`\`json\n${JSON.stringify(notices, null, 2)}\n\`\`\``,
+    },
+  },
   errors: [
+    {
+      reason: 'invalid_field_value',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'One or more matched assignments violate field constraints or target discovery-only fields.',
+      recovery:
+        'Use docgen_list_form_fields to check field types, maximum lengths and allowed choices, then correct the listed values.',
+      thrownBy: 'service',
+    },
     {
       reason: 'not_a_form',
       code: JsonRpcErrorCode.ValidationError,
@@ -60,7 +92,7 @@ export const fillFormTool = tool('docgen_fill_form', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'sourcePdf.url did not return a fetchable PDF — non-2xx, wrong content-type, too large, or blocked by the SSRF guard.',
       recovery:
-        'Verify the URL is public https serving application/pdf, or pass the PDF as base64 to skip the fetch entirely.',
+        'Use a public HTTPS URL serving application/pdf or application/octet-stream with bytes starting with %PDF-, or pass the PDF as base64.',
       thrownBy: 'service',
     },
     {
@@ -94,7 +126,13 @@ export const fillFormTool = tool('docgen_fill_form', {
     if (result.unmatchedFields.length > 0) {
       ctx.log.notice('Form fill had unmatched field names', { unmatched: result.unmatchedFields });
     }
-    return { document, unmatchedFields: result.unmatchedFields };
+    ctx.enrich({ notices: result.notices });
+    return {
+      document,
+      unmatchedFields: result.unmatchedFields,
+      resolvedFields: result.resolvedFields,
+      madeEditableFields: result.madeEditableFields,
+    };
   },
 
   format: (result) => {
@@ -102,10 +140,14 @@ export const fillFormTool = tool('docgen_fill_form', {
     const kb = (d.byteSize / 1024).toFixed(1);
     const pages = d.pageCount ?? 0;
     const envelope = formatEnvelopeLines(`Filled a ${pages}-page PDF form (${kb} KB).`, d);
-    const unmatched =
-      result.unmatchedFields.length > 0
-        ? `**Unmatched fields:** ${result.unmatchedFields.join(', ')} — correct these names and re-render to fill them.`
-        : '**Unmatched fields:** none — every field name matched.';
-    return [{ type: 'text', text: `${envelope}\n${unmatched}` }];
+    const report = {
+      unmatchedFields: result.unmatchedFields,
+      resolvedFields: result.resolvedFields,
+      madeEditableFields: result.madeEditableFields,
+    };
+    return [
+      { type: 'text', text: envelope },
+      { type: 'text', text: `\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`` },
+    ];
   },
 });

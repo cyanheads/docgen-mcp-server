@@ -8,11 +8,11 @@ import { getRenderService } from '@/services/document/render-service.js';
 import { SourcePdfSchema } from '@/services/document/render-types.js';
 import { resolveSourcePdf } from '@/services/document/source-pdf.js';
 
-/** Discovers exact field names, types, required flags and choice options. */
+/** Discovers exact field names, constraints, current values and widget pages. */
 export const listFormFieldsTool = tool('docgen_list_form_fields', {
   title: 'List PDF Form Fields',
   description:
-    'List the AcroForm fields in a PDF before calling docgen_fill_form. Provide exactly one sourcePdf.base64 or sourcePdf.url; URL sources must be public https serving application/pdf. Returns exact case-sensitive names (including nested names), canonical field types, required flags and options on dropdown, optionList and radioGroup fields. Signature and button entries are discovery only; docgen_fill_form does not sign PDFs or invoke buttons. Does not change the PDF or store a document.',
+    'List the AcroForm fields in a PDF before or after filling. Provide exactly one sourcePdf.base64 or sourcePdf.url. URL sources must be public HTTPS serving application/pdf, or application/octet-stream when bytes start with %PDF-. Returns exact field names, types and required flags, plus available choices, tooltips, maximum text lengths, checkbox export values, current values and first widget pages where defined. Signature and button entries are discovery only. Does not change the PDF or store a document.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
   input: z.object({ sourcePdf: SourcePdfSchema }),
   output: z.object({
@@ -41,6 +41,25 @@ export const listFormFieldsTool = tool('docgen_list_form_fields', {
               .describe(
                 'Available choices, present only for dropdown, optionList and radioGroup fields.',
               ),
+            label: z.string().optional().describe('Tooltip defined in the field dictionary.'),
+            maxLength: z.number().optional().describe('Maximum text field length when defined.'),
+            onValue: z.string().optional().describe('Checkbox export value when defined.'),
+            value: z
+              .union([
+                z.string().describe('Stored text or radio selection.'),
+                z.boolean().describe('Whether the checkbox is checked.'),
+                z.array(z.string()).describe('Selected dropdown or option-list values.'),
+              ])
+              .optional()
+              .describe(
+                'Current text or radio value, checkbox state, or selected dropdown or option-list values. Omitted for unset text or radio fields and for signatures and buttons.',
+              ),
+            page: z
+              .number()
+              .int()
+              .positive()
+              .optional()
+              .describe('One-based page of the first widget, if known.'),
           })
           .describe('One AcroForm field inventory entry.'),
       )
@@ -75,7 +94,7 @@ export const listFormFieldsTool = tool('docgen_list_form_fields', {
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The URL is blocked or did not return a fetchable PDF.',
       recovery:
-        'Verify the URL is public https serving application/pdf, or pass the PDF as base64 to skip the fetch entirely.',
+        'Use a public HTTPS URL serving application/pdf or application/octet-stream with bytes starting with %PDF-, or pass the PDF as base64.',
       thrownBy: 'service',
     },
     {

@@ -11,23 +11,22 @@ import type { Context } from '@cyanheads/mcp-ts-core';
 import { timeout, validationError } from '@cyanheads/mcp-ts-core/errors';
 import ExcelJS from 'exceljs';
 import {
-  PDFButton,
-  PDFCheckBox,
+  PDFArray,
   PDFDocument,
-  PDFDropdown,
   type PDFFont,
-  PDFOptionList,
+  type PDFForm,
+  PDFName,
+  type PDFObject,
   type PDFPage,
-  PDFRadioGroup,
-  PDFSignature,
-  PDFTextField,
   rgb,
   StandardFonts,
 } from 'pdf-lib';
 import { getServerConfig } from '@/config/server-config.js';
 import { fetchPdfGuarded } from './fetch-guard.js';
+import { applyFormAssignments, type FormAssignmentReport } from './form-assignments.js';
+import { type FormFieldInfo, inventoryFormFields } from './form-inventory.js';
 import { type BlockDocument, htmlToBlocks, markdownToBlocks } from './html-blocks.js';
-import type { PageOptions, PdfSource, Sheet } from './render-types.js';
+import type { FormFields, PageOptions, PdfSource, Sheet } from './render-types.js';
 import { PDF_MIME, type RenderResult, XLSX_MIME } from './types.js';
 
 /** Page dimensions in PostScript points (1pt = 1/72in), portrait orientation. */
@@ -59,42 +58,48 @@ interface PdfRenderOutput extends RenderResult {
   degraded: boolean;
 }
 
-export interface FillFormResult extends RenderResult {
-  /** Field names supplied in the map that had no AcroForm counterpart. */
-  unmatchedFields: string[];
-}
+/** Filled PDF bytes and assignment results. */
+export interface FillFormResult extends RenderResult, FormAssignmentReport {}
 
-/** Read-only inventory entry; choice fields alone expose options. */
-export interface FormFieldInfo {
-  name: string;
-  options?: string[];
-  required: boolean;
-  type: 'text' | 'checkbox' | 'dropdown' | 'optionList' | 'radioGroup' | 'signature' | 'button';
+/** Bakes the widget appearances and removes their entries from page annotation arrays. */
+function flattenForm(form: PDFForm): void {
+  // pdf-lib 1.17.1 removes annotation entries by appearance ref, then deletes the widget objects.
+  const widgetEntries = new Set<PDFObject>();
+  for (const field of form.getFields()) {
+    const kids = field.acroField.Kids();
+    if (kids) {
+      for (let i = 0; i < kids.size(); i++) widgetEntries.add(kids.get(i));
+    } else {
+      // A terminal field without /Kids is also its own widget.
+      widgetEntries.add(field.ref);
+      widgetEntries.add(field.acroField.dict);
+    }
+  }
+  form.flatten();
+  if (widgetEntries.size === 0) return;
+
+  for (const page of form.doc.getPages()) {
+    const annotations = page.node.lookup(PDFName.Annots);
+    if (!(annotations instanceof PDFArray)) continue;
+    const count = annotations.size();
+    let retained = 0;
+    for (let i = 0; i < count; i++) {
+      const entry = annotations.get(i);
+      if (widgetEntries.has(entry)) continue;
+      if (retained !== i) annotations.set(retained, entry);
+      retained++;
+    }
+    // Compact once so mixed widget and non-widget entries do not incur repeated shifts.
+    for (let i = count - 1; i >= retained; i--) annotations.remove(i);
+  }
 }
 
 export class RenderService {
   /** Lists every supported AcroForm field without saving or storing the PDF. */
   listFormFields(sourceBytes: Uint8Array, ctx: Context): Promise<FormFieldInfo[]> {
-    return this.withTimeout(getServerConfig().renderTimeoutMs, ctx, async () => {
-      const pdf = await this.loadFormPdf(sourceBytes, ctx);
-      return pdf
-        .getForm()
-        .getFields()
-        .map((field) => {
-          const base = { name: field.getName(), required: field.isRequired() };
-          if (field instanceof PDFTextField) return { ...base, type: 'text' };
-          if (field instanceof PDFCheckBox) return { ...base, type: 'checkbox' };
-          if (field instanceof PDFDropdown)
-            return { ...base, type: 'dropdown', options: field.getOptions() };
-          if (field instanceof PDFOptionList)
-            return { ...base, type: 'optionList', options: field.getOptions() };
-          if (field instanceof PDFRadioGroup)
-            return { ...base, type: 'radioGroup', options: field.getOptions() };
-          if (field instanceof PDFSignature) return { ...base, type: 'signature' };
-          if (field instanceof PDFButton) return { ...base, type: 'button' };
-          throw new Error(`Unsupported AcroForm field class: ${field.constructor.name}`);
-        });
-    });
+    return this.withTimeout(getServerConfig().renderTimeoutMs, ctx, async () =>
+      inventoryFormFields(await this.loadFormPdf(sourceBytes, ctx)),
+    );
   }
 
   /** Loads a PDF and enforces the shared AcroForm-source rejection contract. */
@@ -185,12 +190,12 @@ export class RenderService {
   /**
    * Loads a source PDF (base64 already decoded, or fetched behind the SSRF guard
    * by the handler), fills its AcroForm fields from the value map, optionally
-   * flattens it, and returns the result plus any field names that had no match.
-   * Throws `not_a_form` when the PDF has no fillable AcroForm fields.
+   * flattens it, and returns the result and assignment report.
+   * Rejects sources without AcroForm fields and invalid field assignments.
    */
   fillForm(
     sourceBytes: Uint8Array,
-    fields: Record<string, string | number | boolean>,
+    fields: FormFields,
     flatten: boolean,
     ctx: Context,
   ): Promise<FillFormResult> {
@@ -198,35 +203,24 @@ export class RenderService {
     return this.withTimeout(renderTimeoutMs, ctx, async () => {
       const pdfDoc = await this.loadFormPdf(sourceBytes, ctx);
       const form = pdfDoc.getForm();
-      const formFields = form.getFields();
+      const report = applyFormAssignments(form, fields, ctx);
 
-      const available = new Set(formFields.map((f) => f.getName()));
-      const unmatchedFields: string[] = [];
-
-      for (const [name, value] of Object.entries(fields)) {
-        if (!available.has(name)) {
-          unmatchedFields.push(name);
-          continue;
-        }
-        this.applyFieldValue(form, name, value);
-      }
-
-      if (flatten) form.flatten();
+      if (flatten) flattenForm(form);
 
       const buffer = await pdfDoc.save();
       const bytes = new Uint8Array(buffer);
       this.assertWithinByteCeiling(bytes.byteLength, ctx);
       ctx.log.info('Filled form', {
         pageCount: pdfDoc.getPageCount(),
-        filled: Object.keys(fields).length - unmatchedFields.length,
-        unmatched: unmatchedFields.length,
+        filled: Object.keys(fields).length - report.unmatchedFields.length,
+        unmatched: report.unmatchedFields.length,
         flattened: flatten,
       });
       return {
         bytes,
         mimeType: PDF_MIME,
         pageCount: pdfDoc.getPageCount(),
-        unmatchedFields,
+        ...report,
       };
     });
   }
@@ -524,37 +518,6 @@ export class RenderService {
       return value;
     }
     return value;
-  }
-
-  /** Applies a value to a named AcroForm field, dispatching by field type. */
-  private applyFieldValue(
-    form: ReturnType<PDFDocument['getForm']>,
-    name: string,
-    value: string | number | boolean,
-  ): void {
-    const field = form.getField(name);
-    const ctor = field.constructor.name;
-    if (ctor === 'PDFCheckBox') {
-      const cb = form.getCheckBox(name);
-      if (value === true || value === 'true' || value === 'on' || value === 1 || value === '1')
-        cb.check();
-      else cb.uncheck();
-      return;
-    }
-    if (ctor === 'PDFDropdown') {
-      form.getDropdown(name).select(String(value));
-      return;
-    }
-    if (ctor === 'PDFOptionList') {
-      form.getOptionList(name).select(String(value));
-      return;
-    }
-    if (ctor === 'PDFRadioGroup') {
-      form.getRadioGroup(name).select(String(value));
-      return;
-    }
-    // Default: text field.
-    form.getTextField(name).setText(String(value));
   }
 
   /** Aborts a render whose artifact would exceed the configured byte ceiling. */

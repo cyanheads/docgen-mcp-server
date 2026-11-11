@@ -6,7 +6,8 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
-import { PDFDocument } from 'pdf-lib';
+import { Lexer, type Tokens } from 'marked';
+import { PDFDocument, PDFHexString, PDFName } from 'pdf-lib';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import { exportSpreadsheetTool } from '@/mcp-server/tools/definitions/export-spreadsheet.tool.js';
@@ -14,7 +15,7 @@ import { fillFormTool } from '@/mcp-server/tools/definitions/fill-form.tool.js';
 import { getDocumentTool } from '@/mcp-server/tools/definitions/get-document.tool.js';
 import { listFormFieldsTool } from '@/mcp-server/tools/definitions/list-form-fields.tool.js';
 import { renderPdfTool } from '@/mcp-server/tools/definitions/render-pdf.tool.js';
-import { initDocumentStore } from '@/services/document/document-store.js';
+import { getDocumentStore, initDocumentStore } from '@/services/document/document-store.js';
 import { initRenderService } from '@/services/document/render-service.js';
 
 it('distinguishes domain validation from malformed arguments on both surfaces', async () => {
@@ -62,12 +63,18 @@ function assertDomainFailure(
     structuredContent: { error: { code, data: { reason, recovery: { hint: recovery } } } },
   });
   expect(JSON.stringify(result.content)).toContain(reason);
+  const recoveryParagraph = result.content
+    .filter((block) => block.type === 'text')
+    .flatMap((block) => new Lexer({ gfm: false }).lex(block.text))
+    .find(
+      (token): token is Tokens.Paragraph =>
+        token.type === 'paragraph' && token.raw.startsWith('Recovery: '),
+    );
   expect(
-    result.content
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text)
-      .join('\n'),
-  ).toContain(recovery);
+    recoveryParagraph?.tokens
+      .map((token) => (token.type === 'escape' ? token.text : token.raw))
+      .join(''),
+  ).toBe(`Recovery: ${recovery}`);
 }
 
 it('covers semantic service failures and keeps their recovery on both surfaces', async () => {
@@ -137,6 +144,8 @@ it('returns the complete inventory through structured and text surfaces', async 
   field.addOptions(['west', 'east']);
   field.enableRequired();
   field.addToPage(page);
+  field.select('west');
+  field.acroField.dict.set(PDFName.of('TU'), PDFHexString.fromText('Which region?'));
   const expected = {
     fields: [
       {
@@ -144,6 +153,9 @@ it('returns the complete inventory through structured and text surfaces', async 
         type: 'dropdown',
         required: true,
         options: ['west', 'east'],
+        value: ['west'],
+        label: 'Which region?',
+        page: 1,
       },
     ],
   };
@@ -154,6 +166,62 @@ it('returns the complete inventory through structured and text surfaces', async 
   expect(result.structuredContent).toEqual(expected);
   const domain = result.content.find((block) => block.type === 'text');
   expect(JSON.parse((domain as { text: string }).text)).toEqual(expected);
+});
+
+it('reports form assignment results and notices on both MCP surfaces', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage();
+  const form = pdf.getForm();
+  const dropdown = form.createDropdown('parent.child.color');
+  dropdown.addOptions(['blue']);
+  dropdown.addToPage(page);
+  form.createCheckBox('agree').addToPage(page);
+  const result = await runToolContract(fillFormTool, {
+    sourcePdf: { base64: Buffer.from(await pdf.save()).toString('base64') },
+    fields: { color: 'B[L]UE `one`\nnext', agree: 'maybe', missing: true },
+    flatten: true,
+  });
+  const assignmentReport = {
+    unmatchedFields: ['missing'],
+    resolvedFields: [{ requested: 'color', resolved: 'parent.child.color' }],
+    madeEditableFields: ['parent.child.color'],
+  };
+  expect(result.isError).not.toBe(true);
+  const notices = [
+    'Made "parent.child.color" editable to enter "B[L]UE `one`\\nnext".',
+    'Unchecked "agree" because "maybe" is an unrecognized checkbox value.',
+  ];
+  expect(result.structuredContent).toMatchObject({ ...assignmentReport, notices });
+  const reports = result.content
+    .filter((block) => block.type === 'text')
+    .flatMap((block) => new Lexer({ gfm: false }).lex(block.text))
+    .filter((token): token is Tokens.Code => token.type === 'code' && token.lang === 'json')
+    .map((token) => JSON.parse(token.text));
+  expect(reports).toEqual([assignmentReport, notices]);
+});
+
+it('returns aggregate form validation and recovery on both surfaces without storing a document', async () => {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage();
+  const form = pdf.getForm();
+  const text = form.createTextField('short');
+  text.setMaxLength(2);
+  text.addToPage(page);
+  form.createTextField('visible').addToPage(page);
+  const put = vi.spyOn(getDocumentStore(), 'put');
+  const result = await runToolContract(fillFormTool, {
+    sourcePdf: { base64: Buffer.from(await pdf.save()).toString('base64') },
+    fields: { short: 'abc', visible: 'Ł' },
+  });
+  const recovery = fillFormTool.errors?.find(
+    (entry) => entry.reason === 'invalid_field_value',
+  )?.recovery;
+  expect(recovery).toBeDefined();
+  assertDomainFailure(result, 'invalid_field_value', recovery!);
+  for (const surface of [result.structuredContent, result.content]) {
+    expect(JSON.stringify(surface)).toMatch(/short.*maximum length of 2.*visible.*Ł/s);
+  }
+  expect(put).not.toHaveBeenCalled();
 });
 
 it('preserves inventory schema rejection and timeout contracts', async () => {

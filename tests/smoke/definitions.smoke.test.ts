@@ -97,7 +97,7 @@ describe('definition smoke test', () => {
       { sourcePdf: { base64: Buffer.from(await source.save()).toString('base64') } },
       ctx,
     );
-    expect(inventory.fields).toEqual([{ name: 'status', type: 'text', required: false }]);
+    expect(inventory.fields).toEqual([{ name: 'status', type: 'text', required: false, page: 1 }]);
     expect(listFormFieldsTool.title).toBe('List PDF Form Fields');
 
     const fetched = await getDocumentTool.handler(

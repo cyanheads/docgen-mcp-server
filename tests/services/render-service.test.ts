@@ -11,10 +11,12 @@ import ExcelJS from 'exceljs';
 import {
   decodePDFRawStream,
   PDFArray,
+  PDFDict,
   PDFDocument,
   PDFHexString,
   PDFName,
   PDFRawStream,
+  PDFRef,
 } from 'pdf-lib';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
@@ -325,6 +327,304 @@ describe('RenderService', () => {
   });
 
   describe('fillForm', () => {
+    it('round-trips widgetless Unicode and widget-backed tabs and line breaks', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      form.createTextField('widgetless');
+      form.createTextField('visible').addToPage(page);
+      const result = await svc.fillForm(
+        await pdf.save(),
+        { widgetless: 'Łukasz', visible: 'a\tb\nc' },
+        false,
+        createMockContext(),
+      );
+      const filled = (await PDFDocument.load(result.bytes)).getForm();
+      expect(filled.getTextField('widgetless').getText()).toBe('Łukasz');
+      expect(filled.getTextField('visible').getText()).toBe('a\tb\nc');
+    });
+
+    it('bounds CPU growth when rejecting a glyph at the end of large widget text', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const field = pdf.getForm().createTextField('visible');
+      field.addToPage(page, { width: 200, height: 20 });
+      field.setFontSize(12);
+      const source = await pdf.save();
+      const ctx = createMockContext();
+      const rejectGlyph = async (text: string) => {
+        await expect(svc.fillForm(source, { visible: text }, false, ctx)).rejects.toMatchObject({
+          data: { reason: 'invalid_field_value' },
+          message: expect.stringContaining('cannot display "Ł"'),
+        });
+      };
+      const cpuPerFillUs = async (text: string, repetitions: number) => {
+        const before = process.threadCpuUsage();
+        for (let i = 0; i < repetitions; i++) await rejectGlyph(text);
+        const { user, system } = process.threadCpuUsage(before);
+        return (user + system) / repetitions;
+      };
+      // Use the fastest of three warmed samples to reduce the effect of JIT and GC work.
+      const cpuCeilingUs = 200_000;
+      for (const line of ['aaaaaaaaaa', 'aaaaaaaaa\n']) {
+        const fastestCpuUs = async (size: number, repetitions = 1) => {
+          const text = `${line.repeat(size / line.length)}Ł\n`;
+          await rejectGlyph(text);
+          let fastestUs = Number.POSITIVE_INFINITY;
+          for (let sample = 0; sample < 3; sample++) {
+            fastestUs = Math.min(fastestUs, await cpuPerFillUs(text, repetitions));
+          }
+          expect(
+            fastestUs,
+            `${size} characters with line pattern ${JSON.stringify(line)}`,
+          ).toBeLessThan(cpuCeilingUs);
+          return fastestUs;
+        };
+        const smallestUs = await fastestCpuUs(1_000, 16);
+        await fastestCpuUs(5_000, 4);
+        await fastestCpuUs(20_000, 2);
+        const largestUs = await fastestCpuUs(80_000);
+        expect(largestUs, `full-span CPU with line pattern ${JSON.stringify(line)}`).toBeLessThan(
+          smallestUs * 256,
+        );
+      }
+    });
+
+    it('aggregates field-specific length, choice, glyph and unsupported field failures', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      const short = form.createTextField('short');
+      short.setMaxLength(2);
+      short.addToPage(page);
+      form.createTextField('visible').addToPage(page);
+      const list = form.createOptionList('list');
+      list.addOptions(['red', 'RED']);
+      const radio = form.createRadioGroup('radio');
+      radio.addOptionToPage('yes', page);
+      form.createButton('button').addToPage('Submit', page);
+      await expect(
+        svc.fillForm(
+          await pdf.save(),
+          { short: 'abc', visible: 'Łukasz', list: 'Red', radio: 'no', button: true },
+          false,
+          createMockContext(),
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(
+          /"short".*2.*"visible".*Ł.*"list".*red.*RED.*"radio".*yes.*"button".*discovery/s,
+        ),
+        data: { reason: 'invalid_field_value' },
+      });
+    });
+
+    it('keeps a template option encoding failure outside assignment validation', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const list = pdf.getForm().createOptionList('colors');
+      list.addOptions(['blue']);
+      list.addToPage(page);
+      list.addOptions(['Ł']);
+      const source = await pdf.save({ updateFieldAppearances: false });
+      await expect(
+        svc.fillForm(source, { colors: 'blue' }, false, createMockContext()),
+      ).rejects.toThrow('WinAnsi cannot encode');
+    });
+
+    it('prefers exact radio and list choices and rejects ambiguous case variants', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      const radio = form.createRadioGroup('radio');
+      radio.addOptionToPage('red', page);
+      radio.addOptionToPage('RED', page);
+      const list = form.createOptionList('list');
+      list.addOptions(['blue', 'BLUE']);
+      list.addToPage(page);
+      const source = await pdf.save();
+      const ctx = createMockContext();
+      const exact = await svc.fillForm(source, { radio: 'RED', list: 'blue' }, false, ctx);
+      const selected = (await PDFDocument.load(exact.bytes)).getForm();
+      expect(selected.getRadioGroup('radio').getSelected()).toBe('RED');
+      expect(selected.getOptionList('list').getSelected()).toEqual(['blue']);
+      await expect(
+        svc.fillForm(source, { radio: 'Red', list: 'Blue' }, false, ctx),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(
+          /"radio".*matches multiple choices.*"list".*matches multiple choices/s,
+        ),
+        data: { reason: 'invalid_field_value' },
+      });
+    });
+
+    it('reports an empty unlisted fixed choice and a comb value that overflows after tab expansion', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      const dropdown = form.createDropdown('dropdown');
+      dropdown.addOptions(['blue']);
+      dropdown.addToPage(page);
+      const text = form.createTextField('comb');
+      text.setMaxLength(3);
+      text.enableCombing();
+      text.addToPage(page);
+      await expect(
+        svc.fillForm(await pdf.save(), { dropdown: '', comb: 'a\tb' }, false, createMockContext()),
+      ).rejects.toMatchObject({
+        message: expect.stringMatching(/"dropdown".*nonempty custom text.*"comb".*fit 3 cells/s),
+        data: { reason: 'invalid_field_value' },
+      });
+    });
+
+    it('resolves unique aliases and leaves collisions unmatched in input order', async () => {
+      const pdf = await PDFDocument.create();
+      pdf.addPage();
+      const form = pdf.getForm();
+      for (const name of [
+        'a.b.email',
+        'a.b.name',
+        'c.d.name',
+        'a.b.phone',
+        'a.b.zip',
+        'city',
+        'a.b.City',
+      ]) {
+        form.createTextField(name);
+      }
+      const result = await svc.fillForm(
+        await pdf.save(),
+        {
+          name: 'shared leaf',
+          'A.B.PHONE': 'alias',
+          phone: 'alias again',
+          zip: 'alias',
+          'a.b.zip': 'exact',
+          'A.B.ZIP': 'alias after exact',
+          city: 'exact',
+          City: 'union',
+          missing: '?',
+          email: 'ok',
+          'C.D.NAME': 'ok too',
+        },
+        false,
+        createMockContext(),
+      );
+      expect(result.unmatchedFields).toEqual([
+        'name',
+        'A.B.PHONE',
+        'phone',
+        'zip',
+        'A.B.ZIP',
+        'City',
+        'missing',
+      ]);
+      expect(result.resolvedFields).toEqual([
+        { requested: 'email', resolved: 'a.b.email' },
+        { requested: 'C.D.NAME', resolved: 'c.d.name' },
+      ]);
+      const filled = (await PDFDocument.load(result.bytes)).getForm();
+      expect(filled.getTextField('a.b.email').getText()).toBe('ok');
+      expect(filled.getTextField('c.d.name').getText()).toBe('ok too');
+      expect(filled.getTextField('a.b.zip').getText()).toBe('exact');
+      expect(filled.getTextField('city').getText()).toBe('exact');
+      expect(filled.getTextField('a.b.City').getText()).toBeUndefined();
+      expect(filled.getTextField('a.b.phone').getText()).toBeUndefined();
+    });
+
+    it('recognizes checkbox aliases and reports unknown values', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      const cases = [
+        ['yes', 'Yes', true],
+        ['trim', ' yes ', true],
+        ['x', 'X', true],
+        ['true', 'TRUE', true],
+        ['checked', 'checked', true],
+        ['bool', true, true],
+        ['number', 1, true],
+        ['false', false, false],
+        ['off', 'off', false],
+        ['empty', '', false],
+        ['unknown', 'maybe', false],
+      ] as const;
+      for (const [name] of cases) {
+        const field = form.createCheckBox(name);
+        field.addToPage(page);
+        field.check();
+      }
+      const result = await svc.fillForm(
+        await pdf.save(),
+        Object.fromEntries(cases.map(([name, value]) => [name, value])),
+        false,
+        createMockContext(),
+      );
+      const filled = (await PDFDocument.load(result.bytes)).getForm();
+      for (const [name, , checked] of cases)
+        expect(filled.getCheckBox(name).isChecked(), name).toBe(checked);
+      expect(result.notices).toEqual([expect.stringMatching(/"unknown".*"maybe"/)]);
+    });
+
+    it('prefers exact export strings and keeps boolean and unchecked-alias precedence', async () => {
+      const pdf = await PDFDocument.create();
+      const page = pdf.addPage();
+      const form = pdf.getForm();
+      const cases = [
+        ['numericExport', '3', 3, true],
+        ['decodedExport', 'Done Now', 'done now', true],
+        ['exactExport', 'no', 'no', true],
+        ['foldedExport', 'no', 'NO', false],
+        ['falseBoolean', 'false', false, false],
+      ] as const;
+      for (const [name, onValue] of cases) {
+        const field = form.createCheckBox(name);
+        field.addToPage(page);
+        const normal = field.acroField.getWidgets()[0]?.getAppearances()?.normal;
+        if (!(normal instanceof PDFDict)) throw new Error('Fixture requires a checkbox appearance');
+        const yes = PDFName.of('Yes');
+        normal.set(PDFName.of(onValue), normal.get(yes)!);
+        normal.delete(yes);
+      }
+      const result = await svc.fillForm(
+        await pdf.save(),
+        Object.fromEntries(cases.map(([name, , value]) => [name, value])),
+        false,
+        createMockContext(),
+      );
+      const filled = (await PDFDocument.load(result.bytes)).getForm();
+      for (const [name, , , checked] of cases)
+        expect(filled.getCheckBox(name).isChecked(), name).toBe(checked);
+      expect(result.notices).toEqual([]);
+    });
+
+    it('keeps dropdown literals and reports transitions before flattening', async () => {
+      const source = await makeChoiceFormPdf();
+      const ctx = createMockContext();
+      const custom = await svc.fillForm(
+        source,
+        { dropdown: 'BLUE', radio: 'Yes', options: 'Beta' },
+        false,
+        ctx,
+      );
+      const form = (await PDFDocument.load(custom.bytes)).getForm();
+      expect(form.getDropdown('dropdown').getSelected()).toEqual(['BLUE']);
+      expect(form.getDropdown('dropdown').isEditable()).toBe(true);
+      expect(form.getRadioGroup('radio').getSelected()).toBe('yes');
+      expect(form.getOptionList('options').getSelected()).toEqual(['beta']);
+      expect(custom.madeEditableFields).toEqual(['dropdown']);
+      expect(custom.notices).toEqual([expect.stringMatching(/"dropdown".*"BLUE"/)]);
+      const editable = await svc.fillForm(custom.bytes, { dropdown: 'other' }, false, ctx);
+      expect(editable.madeEditableFields).toEqual([]);
+      const fixed = await svc.fillForm(source, { dropdown: 'blue' }, false, ctx);
+      expect(fixed.madeEditableFields).toEqual([]);
+      expect(
+        (await PDFDocument.load(fixed.bytes)).getForm().getDropdown('dropdown').isEditable(),
+      ).toBe(false);
+      const flat = await svc.fillForm(source, { dropdown: 'purple' }, true, ctx);
+      expect(flat.madeEditableFields).toEqual(['dropdown']);
+      expect((await PDFDocument.load(flat.bytes)).getForm().getFields()).toHaveLength(0);
+    });
+
     it('inventories every field class and nested names without changing bytes', async () => {
       const pdf = await PDFDocument.create();
       const page = pdf.addPage([400, 400]);
@@ -356,16 +656,63 @@ describe('RenderService', () => {
       const set = vi.spyOn(ctx.state, 'set');
       const fields = await svc.listFormFields(source, ctx);
       expect(fields).toEqual([
-        { name: 'applicant.contact.name', type: 'text', required: true },
-        { name: 'agree', type: 'checkbox', required: false },
-        { name: 'choice', type: 'dropdown', required: true, options: ['red', 'blue'] },
-        { name: 'list', type: 'optionList', required: false, options: ['alpha', 'beta'] },
-        { name: 'radio', type: 'radioGroup', required: false, options: ['yes', 'no'] },
-        { name: 'button', type: 'button', required: false },
+        { name: 'applicant.contact.name', type: 'text', required: true, page: 1 },
+        { name: 'agree', type: 'checkbox', required: false, page: 1, value: false, onValue: 'Yes' },
+        {
+          name: 'choice',
+          type: 'dropdown',
+          required: true,
+          options: ['red', 'blue'],
+          page: 1,
+          value: [],
+        },
+        {
+          name: 'list',
+          type: 'optionList',
+          required: false,
+          options: ['alpha', 'beta'],
+          page: 1,
+          value: [],
+        },
+        { name: 'radio', type: 'radioGroup', required: false, options: ['yes', 'no'], page: 1 },
+        { name: 'button', type: 'button', required: false, page: 1 },
         { name: 'signature', type: 'signature', required: true },
       ]);
       expect(source).toEqual(original);
       expect(set).not.toHaveBeenCalled();
+    });
+
+    it('uses the first widget, falls back to annotation membership, and preserves empty plain text', async () => {
+      const pdf = await PDFDocument.create();
+      const firstPage = pdf.addPage();
+      const secondPage = pdf.addPage();
+      const form = pdf.getForm();
+      const field = form.createTextField('root.section.value');
+      field.setMaxLength(4);
+      field.addToPage(secondPage);
+      field.addToPage(firstPage);
+      field.acroField.getWidgets()[0]?.dict.delete(PDFName.of('P'));
+      field.acroField.dict.set(PDFName.of('TU'), PDFHexString.fromText('Ångström'));
+      field.acroField.setValue(PDFHexString.fromText(''));
+      form.createTextField('missing');
+      const rich = form.createTextField('rich');
+      rich.enableRichFormatting();
+      rich.acroField.dict.set(PDFName.of('RV'), PDFHexString.fromText('<p>rich only</p>'));
+      expect(() => rich.getText()).toThrow();
+      const source = await pdf.save({ updateFieldAppearances: false });
+      expect(await svc.listFormFields(source, createMockContext())).toEqual([
+        {
+          name: 'root.section.value',
+          type: 'text',
+          required: false,
+          label: 'Ångström',
+          maxLength: 4,
+          value: '',
+          page: 2,
+        },
+        { name: 'missing', type: 'text', required: false },
+        { name: 'rich', type: 'text', required: false },
+      ]);
     });
 
     it('rejects malformed and zero-field PDF inventory', async () => {
@@ -407,12 +754,63 @@ describe('RenderService', () => {
       expect(result.unmatchedFields).toEqual(['nope']);
     });
 
-    it('flattens the form when requested (fields no longer editable)', async () => {
+    it('flattens widgets into page content and preserves direct and indirect links', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
-      const source = await makeFormPdf();
-      const result = await svc.fillForm(source, { 'applicant.name': 'Flat' }, true, ctx);
+      const pdf = await PDFDocument.create();
+      const pages = [pdf.addPage(), pdf.addPage()];
+      const field = pdf.getForm().createTextField('applicant.contact.name');
+      for (const [index, page] of pages.entries()) {
+        field.addToPage(page);
+        const link = pdf.context.obj({
+          Type: 'Annot',
+          Subtype: 'Link',
+          Rect: [25, 25, 75, 45],
+          A: { S: 'URI', URI: PDFHexString.fromText(`https://example.com/${index}`) },
+        });
+        const annotations = page.node.normalizedEntries().Annots;
+        annotations.push(index === 0 ? link : pdf.context.register(link));
+      }
+      // Exercise both widget /P and page annotation membership lookup.
+      field.acroField.getWidgets()[1]?.dict.delete(PDFName.of('P'));
+      const result = await svc.fillForm(
+        await pdf.save(),
+        { 'applicant.contact.name': 'Flat' },
+        true,
+        ctx,
+      );
       const loaded = await PDFDocument.load(result.bytes);
       expect(loaded.getForm().getFields()).toHaveLength(0);
+      const readStream = (reference: Parameters<typeof loaded.context.lookup>[0]) => {
+        const stream = loaded.context.lookup(reference);
+        if (!(stream instanceof PDFRawStream)) throw new Error('Expected a raw PDF stream.');
+        return Buffer.from(decodePDFRawStream(stream).decode()).toString('latin1');
+      };
+      for (const [index, page] of loaded.getPages().entries()) {
+        const annotations = page.node.Annots();
+        if (!annotations) throw new Error('Expected page annotations.');
+        const linkEntries = annotations.asArray().filter((entry) => {
+          const dict = loaded.context.lookup(entry);
+          return dict instanceof PDFDict && dict.get(PDFName.of('Subtype')) === PDFName.of('Link');
+        });
+        expect(linkEntries).toHaveLength(1);
+        const [entry] = linkEntries;
+        expect(entry).toBeInstanceOf(index === 0 ? PDFDict : PDFRef);
+        const action = loaded.context.lookup(entry, PDFDict).lookup(PDFName.of('A'), PDFDict);
+        expect(action.lookup(PDFName.of('URI'), PDFHexString).decodeText()).toBe(
+          `https://example.com/${index}`,
+        );
+        const contents = page.node.Contents();
+        const xObjects = page.node.Resources()?.lookup(PDFName.XObject, PDFDict);
+        if (!(contents instanceof PDFArray) || !xObjects) {
+          throw new Error('Expected flattened page content and resources.');
+        }
+        expect(xObjects.entries()).toHaveLength(1);
+        for (const [name, reference] of xObjects.entries()) {
+          expect(readStream(reference)).toContain('<466C6174> Tj');
+          expect(contents.asArray().map(readStream).join('\n')).toContain(`${name} Do`);
+        }
+        expect(annotations.asArray()).toEqual(linkEntries);
+      }
     });
 
     it('throws not_a_form for a PDF with no AcroForm fields', async () => {

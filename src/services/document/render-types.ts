@@ -143,7 +143,7 @@ export const SourcePdfSchema = z
       .string()
       .optional()
       .describe(
-        'An https URL serving the source PDF. Fetched behind an SSRF guard; must be public and serve application/pdf.',
+        'A public HTTPS URL serving application/pdf, or application/octet-stream if the response bytes start with %PDF-. Fetched behind an SSRF guard.',
       ),
   })
   .describe('The fillable PDF source — provide exactly ONE of { base64 } or { url }.');
@@ -154,7 +154,7 @@ export type SourcePdf = z.infer<typeof SourcePdfSchema>;
 export const FormFieldsSchema = z
   .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
   .describe(
-    'AcroForm field name → value. Names must match the PDF internal field names exactly (case-sensitive). Unmatched names are returned in unmatchedFields[].',
+    'AcroForm field name → value. Exact names win. A unique case-insensitive full name or exact last segment can resolve when no other key targets that field. Unknown, ambiguous and conflicting keys appear in unmatchedFields[]. Radio groups and option lists accept exact choices or a unique case-insensitive choice. Nonexact dropdown values stay literal and can make a fixed dropdown editable. Checkboxes accept booleans, true/1/yes/on/x/checked, the PDF export value, and false/0/no/off/unchecked/empty. Checkbox aliases are trimmed and case-insensitive. An exact export string wins over string aliases; unchecked aliases win over folded export matches. Unrecognized values uncheck with a notice.',
   );
 
 export type FormFields = z.infer<typeof FormFieldsSchema>;
