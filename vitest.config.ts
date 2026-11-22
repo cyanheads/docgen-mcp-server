@@ -17,6 +17,8 @@ export default mergeConfig(
   defineConfig({
     resolve: { alias },
     test: {
+      // Vitest's forks watchdog requires an IPC channel method Bun does not expose.
+      ...(process.versions.bun && { pool: 'threads' as const }),
       projects: [
         {
           extends: true,
