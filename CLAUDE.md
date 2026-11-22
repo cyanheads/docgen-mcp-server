@@ -34,7 +34,9 @@ docgen-mcp-server renders structured agent content into downloadable binary docu
 - `fetch-guard.ts` — HTTPS PDF fetcher shared by both form tools. Vets all resolved addresses at every redirect hop, tries vetted addresses with bounded TCP fallback, preserves TLS identity and Host, and blocks private/loopback/link-local/metadata destinations. Accepts PDF content type or octet-stream bodies starting with `%PDF-`; enforces byte cap, deadline and cancellation. Failures are leak-free `source_unfetchable` errors.
 - `form-assignments.ts` / `form-inventory.ts` — AcroForm name resolution, assignment validation and read-only field metadata.
 - `source-pdf.ts` — shared source-pair validation, base64 decoding and guarded URL resolution.
-- `html-blocks.ts` — reduces HTML/markdown to a linear block model for the lightweight engine (no JS execution, no remote-resource fetch); flags `degraded` for anything it can't render.
+- `html-blocks.ts` — walks the parse5 tree for HTML and Marked output, preserving block order and list nesting. The lightweight engine prints link destinations and performs no script execution or remote-resource fetch.
+- `pdf-layout.ts` — turns blocks into PDF pages, handling margins, wrapping, fonts, headers, footers and page numbers.
+- `render-template.ts` — resolves template paths and interpolates literal text or HTML fragments.
 - `format-envelope.ts` / `types.ts` / `render-types.ts` — the shared `DocumentEnvelope` formatter, domain types, and render-input schemas.
 
 **Config (`src/config/server-config.ts`):** the `DOCGEN_*` env vars — document TTL, byte ceiling, render timeout, inline threshold, and the PDF engine (`lightweight` only in v1; `chromium` is reserved and rejected at startup).
@@ -256,7 +258,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-docgen semantic reasons use `ValidationError` (`-32007`): empty_workbook, invalid_source, invalid_sheet_name, invalid_pdf_source, not_a_form, invalid_field_value, template_render_failed, document_too_large. Schema failures stay `InvalidParams` (`-32602`); fetch, timeout and missing-document codes remain unchanged.
+Docgen uses `ValidationError` (`-32007`) for `empty_workbook`, `invalid_source`, `invalid_sheet_name`, `invalid_pdf_source`, `not_a_form`, `invalid_field_value`, `template_render_failed`, `invalid_page_margins` and `document_too_large`. Schema failures use `InvalidParams` (`-32602`).
 
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive a typed `ctx.fail(reason, …)`. Production tool calls fill `data.recovery.hint` from the matching declared reason when the throw has no hint; both `structuredContent` and `content[]` carry it. Explicit hints override the contract. `recovery` is required (≥ 5 words, lint-validated). Tool error envelopes carry `data.requestId`, and tool error text closes with the request id. Resource parameter rejections (`-32602`) preserve `data: { uri }`; generic protocol errors need not carry a request id. Direct handler calls bypass the tool hint fill, so service and resource tests that assert a hint directly retain `ctx.recoveryFor`. Mark service-thrown entries `thrownBy: 'service'` so `error-contract-unthrown` skips them; docgen's render and fetch services use this pattern. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) need no declaration.
 

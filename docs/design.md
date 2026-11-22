@@ -88,7 +88,7 @@ of the fleet.
 
 - Render HTML or markdown to PDF with control over page size, orientation, margins,
   header/footer, and page numbers.
-- Render a template (HTML/Handlebars) + a structured data object to PDF (server owns layout).
+- Interpolate a structured data object into an HTML template before PDF layout.
 - Render one or more named sheets of row objects to `.xlsx`, with an optional per-column spec
   (header label, type, width, number/date format).
 - Fill the AcroForm fields of a supplied PDF (base64 or URL) from a field→value map, and
@@ -188,7 +188,7 @@ surfaces as `document_expired` (see Error Contract).
 - **`source`** (render_pdf): exactly one of the following keys must be present (Zod discriminated union on a literal `type` discriminant, or mutual exclusion enforced via `.refine()`):
   - `{ html: string }` — raw HTML string; the agent composes the full document markup.
   - `{ markdown: string }` — markdown string; server converts to HTML then renders.
-  - `{ template: string, data: Record<string, unknown> }` — a Handlebars template string filled with `data`. `data` is `z.record(z.string(), z.unknown())`. Missing template keys are a `template_render_failed` error; extra keys in `data` are silently ignored.
+  - `{ template: string, data: Record<string, unknown> }` — `{{key}}` and dotted paths insert escaped text. Triple braces such as `{{{section}}}` insert an HTML fragment. Numbers and booleans become text. Arrays, including nested arrays, use comma joining. A null array element contributes an empty position. A missing or null path, an object value, an array containing an object, or an unsupported tag produces `template_render_failed`. Unused keys are ignored.
   Providing zero keys, multiple keys, or `data` without a `template` → `invalid_source`.
 
 - **`pageOptions`** (render_pdf): `size` (`'A4' | 'Letter' | 'Legal' | 'A3' | 'A5'` enum,
@@ -197,8 +197,8 @@ surfaces as `document_expired` (see Error Contract).
   `z.string().regex(/^\d+(\.\d+)?(px|pt|mm|cm|in)$/)` — e.g. `"10mm"`, `"0.5in"`, `"72pt"`),
   `header` / `footer` (optional strings supporting the interpolation tokens `{{page}}`,
   `{{total}}`, and `{{date}}` — e.g. `"Page {{page}} of {{total}}"`),
-  `pageNumbers` (boolean, default `false`).
-- **`sheets[]`** (export_spreadsheet): array of `{ name: string, rows: Record<string, string | number | boolean | null>[], columns?: ColumnSpec[] }`. `rows` values are plain JSON-serializable scalars; date values must be ISO 8601 strings when `type: 'date'` is declared in the column spec (exceljs converts them to Excel serial dates). An empty `rows[]` on any sheet is allowed (it produces an empty sheet with headers); `empty_workbook` fires only when `sheets[]` itself is empty.
+  `pageNumbers` (boolean, default `false`). Page geometry accounts for orientation and active header and footer bands. A long header or footer wraps within the page and reserves space before body pagination. A table row taller than a page continues on later pages, with all cells advancing together. A layout that cannot fit the text or decorations returns `invalid_page_margins`.
+- **`sheets[]`** (export_spreadsheet): array of `{ name: string, rows: Record<string, string | number | boolean | null>[], columns?: ColumnSpec[] }`. A date column writes a valid `YYYY-MM-DD` or a full date with a time as an Excel date cell. Offsetless values use UTC. Explicit offsets select an instant. Numeric dates become decimal text, invalid strings stay verbatim, and whitespace-only strings leave the cell blank. Empty rows produce a header-only sheet. An empty `sheets[]` produces `empty_workbook`.
 - **Column spec** (export_spreadsheet): `key` (row-object property name), `header` (display
   label), `type` (`'string' | 'number' | 'date' | 'boolean'`, default `'string'`), `width`
   (column width in character units, `z.number().positive()`), `format`
@@ -221,8 +221,8 @@ No external API → the service layer is the bundled rendering stack plus the ar
 Both follow the framework init/accessor pattern (`getRenderService()` / `getDocumentStore()`,
 initialized in `setup()`). No DataCanvas or MirrorService is needed: a rendered document is one opaque blob, not a queryable table. URL-source connection fallback belongs to the fetch guard.
 
-**Markdown path:** markdown → HTML via a small bundled converter, then through the same
-HTML→PDF engine. Keeps one PDF code path; markdown is sugar over the HTML input.
+**PDF layout.** Marked converts Markdown to HTML. A parse5 tree walk gives HTML, Markdown and filled templates the same block order, character-reference decoding and whitespace rules.
+The lightweight renderer draws headings, paragraphs, nested lists, task markers, table rows and preformatted text. Links print a label and destination, with a single copy when they match.
 
 **Why two `ctx.state` keys, not one record:** the bytes and the meta record live under
 separate keys (`doc/blob/{id}` and `doc/meta/{id}`) so a read that only needs metadata never
@@ -352,7 +352,8 @@ docgen's named semantic, fetch and timeout reasons are declared inline for recov
 | all `render/export/fill` | `document_too_large` | `ValidationError` | Rendered artifact exceeded `DOCGEN_MAX_DOCUMENT_BYTES`. | Reduce content (fewer rows/pages, smaller images) and retry. |
 | all `render/export/fill` | `render_timeout` | `Timeout` | Render exceeded `DOCGEN_RENDER_TIMEOUT_MS`. | Simplify the document or split it into smaller renders. |
 | `docgen_render_pdf` | `invalid_source` | `ValidationError` | None of `html` / `markdown` / `template`+`data` was provided, more than one was, or `data` was supplied without a `template`. | Provide exactly one source form; `data` pairs only with `template`. |
-| `docgen_render_pdf` | `template_render_failed` | `ValidationError` | The template referenced data keys absent from `data`, or the template was malformed. | Check the template's referenced fields against the `data` object. |
+| `docgen_render_pdf` | `template_render_failed` | `ValidationError` | A referenced path is missing, its value cannot be interpolated, or the template contains an unsupported tag. | Check the named path and value. Compose blocks in HTML before rendering. |
+| `docgen_render_pdf` | `invalid_page_margins` | `ValidationError` | The requested margins leave too little room for the content. | Reduce the named margins, change orientation, or choose a larger page. |
 | `docgen_export_spreadsheet` | `empty_workbook` | `ValidationError` | `sheets[]` was empty (no sheets at all). | Provide at least one sheet. |
 | `docgen_export_spreadsheet` | `invalid_sheet_name` | `ValidationError` | A worksheet name is blank, over 31 characters, contains `* ? : \ / [ ]`, begins or ends with an apostrophe, or duplicates another (case-insensitive). | Rename to a unique 1–31 character label without the forbidden characters. |
 | both form tools | `invalid_source` | `ValidationError` | Neither source variant was supplied, or both were. | Provide exactly one base64-or-URL source. |
@@ -465,7 +466,7 @@ Semantic errors use `ValidationError` (-32007); malformed tool arguments use `In
   arbitrary CSS — complex flex/grid layouts, web fonts, and advanced page-break control are
   constrained. Agents needing pixel-faithful full-CSS HTML→PDF wait for the deferred
   `chromium` engine. The handler surfaces a `degraded: true` enrichment flag when it drops
-  unsupported styling or replaces characters with `?` on any text surface, including headers and footers. Existing smart-punctuation transliteration and supported Latin-1 remain non-degraded absent another trigger.
+  unsupported styling or replaces characters with `?` on any text surface, including headers and footers. Helvetica’s supported WinAnsi characters and smart-punctuation transliterations alone leave `degraded` false.
 - **Untrusted HTML is an input sink.** `docgen_render_pdf` renders caller-supplied HTML. The
   lightweight engine has a far smaller attack surface than a real browser (no JS execution, no
   network fetches from the document), but the `security-pass` step must confirm no

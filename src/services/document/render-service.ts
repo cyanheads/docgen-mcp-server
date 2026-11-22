@@ -10,52 +10,35 @@
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { timeout, validationError } from '@cyanheads/mcp-ts-core/errors';
 import ExcelJS from 'exceljs';
-import {
-  PDFArray,
-  PDFDocument,
-  type PDFFont,
-  type PDFForm,
-  PDFName,
-  type PDFObject,
-  type PDFPage,
-  rgb,
-  StandardFonts,
-} from 'pdf-lib';
+import { PDFArray, PDFDocument, type PDFForm, PDFName, type PDFObject } from 'pdf-lib';
 import { getServerConfig } from '@/config/server-config.js';
 import { fetchPdfGuarded } from './fetch-guard.js';
 import { applyFormAssignments, type FormAssignmentReport } from './form-assignments.js';
 import { type FormFieldInfo, inventoryFormFields } from './form-inventory.js';
 import { type BlockDocument, htmlToBlocks, markdownToBlocks } from './html-blocks.js';
+import { layoutPdf, type PdfRenderOutput } from './pdf-layout.js';
+import { renderTemplate } from './render-template.js';
 import type { FormFields, PageOptions, PdfSource, Sheet } from './render-types.js';
 import { PDF_MIME, type RenderResult, XLSX_MIME } from './types.js';
-
-/** Page dimensions in PostScript points (1pt = 1/72in), portrait orientation. */
-const PAGE_SIZES = {
-  A3: [841.89, 1190.55],
-  A4: [595.28, 841.89],
-  A5: [419.53, 595.28],
-  Letter: [612, 792],
-  Legal: [612, 1008],
-} satisfies Record<PageOptions['size'], readonly [number, number]>;
-
-const UNIT_TO_PT = { px: 0.75, pt: 1, mm: 2.83465, cm: 28.3465, in: 72 } as const;
-const DEFAULT_MARGIN_PT = 54; // 0.75in
 
 /** Excel's worksheet-name limits — applied before any sheet is added to the workbook. */
 const MAX_SHEET_NAME_LENGTH = 31;
 const FORBIDDEN_SHEET_NAME_CHARS = /[*?:\\/[\]]/;
 
-/** Parses a CSS length ("10mm", "0.5in") to points; falls back to the default. */
-function lengthToPt(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const m = value.match(/^([\d.]+)(px|pt|mm|cm|in)$/);
-  if (!m) return fallback;
-  return Number(m[1]) * UNIT_TO_PT[m[2] as keyof typeof UNIT_TO_PT];
-}
+/** Matches a full calendar date with an optional clock time and UTC offset. */
+const SPREADSHEET_DATE =
+  /^(\d{4}-\d{2}-\d{2})(?:T(?:(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?|24:00(?::00(?:\.0+)?)?)(Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?)?$/i;
 
-/** Result of a PDF render: the bytes plus the page count and degraded flag. */
-interface PdfRenderOutput extends RenderResult {
-  degraded: boolean;
+/** Uses a UTC calendar round trip to catch day overflow before applying offsets. */
+function parseSpreadsheetDate(value: string): Date | undefined {
+  const [, calendarDate, offset] = SPREADSHEET_DATE.exec(value) ?? [];
+  if (calendarDate === undefined) return undefined;
+  const midnight = new Date(calendarDate);
+  if (Number.isNaN(midnight.getTime()) || !midnight.toISOString().startsWith(calendarDate)) {
+    return undefined;
+  }
+  if (value === calendarDate) return midnight;
+  return new Date(offset ? value : `${value}Z`);
 }
 
 /** Filled PDF bytes and assignment results. */
@@ -130,7 +113,7 @@ export class RenderService {
     const { renderTimeoutMs } = getServerConfig();
     return this.withTimeout(renderTimeoutMs, ctx, async () => {
       const doc = this.resolveSourceToBlocks(source, ctx);
-      const out = await this.layoutPdf(doc, pageOptions, ctx);
+      const out = await layoutPdf(doc, pageOptions, ctx);
       this.assertWithinByteCeiling(out.bytes.byteLength, ctx);
       ctx.log.info('Rendered PDF', {
         pageCount: out.pageCount,
@@ -242,222 +225,8 @@ export class RenderService {
     if (source.html !== undefined) return htmlToBlocks(source.html);
     if (source.markdown !== undefined) return markdownToBlocks(source.markdown);
     // template path — handler validated template+data present before calling renderPdf.
-    const filled = this.renderTemplate(source.template ?? '', source.data ?? {}, ctx);
+    const filled = renderTemplate(source.template ?? '', source.data ?? {}, ctx);
     return htmlToBlocks(filled);
-  }
-
-  /**
-   * Fills a `{{key}}` / `{{a.b}}` template from a data object. A referenced key
-   * absent from `data` throws `template_render_failed` — the agent's signal to
-   * reconcile the template against its data. `ctx` is threaded through so the throw
-   * carries the declared recovery hint (`ctx.recoveryFor`) onto the wire, matching
-   * the other typed failures in this service.
-   */
-  private renderTemplate(template: string, data: Record<string, unknown>, ctx: Context): string {
-    return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, path: string) => {
-      let value: unknown = data;
-      for (const key of path.split('.')) {
-        if (value && typeof value === 'object' && key in (value as Record<string, unknown>)) {
-          value = (value as Record<string, unknown>)[key];
-        } else {
-          value = undefined;
-          break;
-        }
-      }
-      if (value === undefined || value === null) {
-        throw validationError(
-          `Template references "${path}" but it is missing from the data object.`,
-          {
-            reason: 'template_render_failed',
-            missingKey: path,
-            ...ctx.recoveryFor('template_render_failed'),
-          },
-        );
-      }
-      return String(value);
-    });
-  }
-
-  /** Lays the block model onto PDF pages, drawing top-to-bottom with wrapping. */
-  private async layoutPdf(
-    doc: BlockDocument,
-    opts: PageOptions,
-    ctx: Context,
-  ): Promise<PdfRenderOutput> {
-    const pdf = await PDFDocument.create();
-    const font = await pdf.embedFont(StandardFonts.Helvetica);
-    const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-    let degraded = doc.degraded;
-    const supported = new Set(font.getCharacterSet());
-    const safeText = (text: string): string =>
-      sanitizeForFont(text, supported, () => {
-        degraded = true;
-      });
-
-    const [pw, ph] = PAGE_SIZES[opts.size];
-    const [pageW, pageH] = opts.orientation === 'landscape' ? [ph, pw] : [pw, ph];
-    const mTop = lengthToPt(opts.margin?.top, DEFAULT_MARGIN_PT);
-    const mRight = lengthToPt(opts.margin?.right, DEFAULT_MARGIN_PT);
-    const mBottom = lengthToPt(opts.margin?.bottom, DEFAULT_MARGIN_PT);
-    const mLeft = lengthToPt(opts.margin?.left, DEFAULT_MARGIN_PT);
-    const contentW = pageW - mLeft - mRight;
-    const reserveFooter = opts.pageNumbers || opts.footer ? 24 : 0;
-    const reserveHeader = opts.header ? 24 : 0;
-
-    const pages: PDFPage[] = [];
-    let page = pdf.addPage([pageW, pageH]);
-    pages.push(page);
-    let y = pageH - mTop - reserveHeader;
-
-    const newPage = () => {
-      page = pdf.addPage([pageW, pageH]);
-      pages.push(page);
-      y = pageH - mTop - reserveHeader;
-    };
-    const ensure = (need: number) => {
-      if (y - need < mBottom + reserveFooter) newPage();
-    };
-
-    const drawWrapped = (text: string, size: number, useFont: PDFFont, indent = 0): void => {
-      const maxW = contentW - indent;
-      for (const para of text.split('\n')) {
-        const safe = safeText(para);
-        const lines = wrapText(safe, useFont, size, maxW);
-        const lineHeight = size * 1.35;
-        for (const line of lines) {
-          ensure(lineHeight);
-          page.drawText(line, {
-            x: mLeft + indent,
-            y: y - size,
-            size,
-            font: useFont,
-            color: rgb(0.1, 0.1, 0.1),
-          });
-          y -= lineHeight;
-        }
-      }
-    };
-
-    for (const block of doc.blocks) {
-      if (ctx.signal.aborted) break;
-      switch (block.kind) {
-        case 'heading': {
-          const size = Math.max(12, 24 - (block.level - 1) * 3);
-          y -= 6;
-          drawWrapped(block.text, size, bold);
-          y -= 2;
-          break;
-        }
-        case 'paragraph':
-          drawWrapped(block.text, 11, font);
-          y -= 4;
-          break;
-        case 'listItem': {
-          const marker = block.ordered ? `${block.index}.` : '•';
-          ensure(11 * 1.35);
-          page.drawText(marker, {
-            x: mLeft + 6,
-            y: y - 11,
-            size: 11,
-            font,
-            color: rgb(0.1, 0.1, 0.1),
-          });
-          drawWrapped(block.text, 11, font, 22);
-          break;
-        }
-        case 'tableRow': {
-          const cellFont = block.header ? bold : font;
-          const cols = block.cells.length || 1;
-          const colW = contentW / cols;
-          const rowLines = block.cells.map((c) => wrapText(safeText(c), cellFont, 10, colW - 8));
-          const rowHeight = Math.max(1, ...rowLines.map((l) => l.length)) * (10 * 1.3) + 4;
-          ensure(rowHeight);
-          const rowTop = y;
-          block.cells.forEach((_, i) => {
-            const cx = mLeft + i * colW + 4;
-            let cy = rowTop - 10;
-            for (const line of rowLines[i] ?? []) {
-              page.drawText(line, {
-                x: cx,
-                y: cy,
-                size: 10,
-                font: cellFont,
-                color: rgb(0.1, 0.1, 0.1),
-              });
-              cy -= 10 * 1.3;
-            }
-          });
-          y = rowTop - rowHeight;
-          page.drawLine({
-            start: { x: mLeft, y: y + 2 },
-            end: { x: mLeft + contentW, y: y + 2 },
-            thickness: 0.5,
-            color: rgb(0.8, 0.8, 0.8),
-          });
-          break;
-        }
-        case 'rule':
-          ensure(12);
-          y -= 6;
-          page.drawLine({
-            start: { x: mLeft, y },
-            end: { x: mLeft + contentW, y },
-            thickness: 0.5,
-            color: rgb(0.7, 0.7, 0.7),
-          });
-          y -= 6;
-          break;
-        case 'spacer':
-          y -= 8;
-          break;
-      }
-    }
-
-    // Headers / footers / page numbers, interpolating the tokens per page.
-    const total = pages.length;
-    pages.forEach((p, i) => {
-      const tokens = {
-        page: String(i + 1),
-        total: String(total),
-        date: new Date().toISOString().slice(0, 10),
-      };
-      const interp = (tpl: string) =>
-        tpl.replace(
-          /\{\{\s*(page|total|date)\s*\}\}/g,
-          (_m, k: 'page' | 'total' | 'date') => tokens[k],
-        );
-      if (opts.header) {
-        p.drawText(safeText(interp(opts.header)), {
-          x: mLeft,
-          y: pageH - mTop + 6,
-          size: 9,
-          font,
-          color: rgb(0.4, 0.4, 0.4),
-        });
-      }
-      const footerText = opts.footer
-        ? interp(opts.footer)
-        : opts.pageNumbers
-          ? `Page ${i + 1} of ${total}`
-          : undefined;
-      if (footerText) {
-        p.drawText(safeText(footerText), {
-          x: mLeft,
-          y: mBottom - 12,
-          size: 9,
-          font,
-          color: rgb(0.4, 0.4, 0.4),
-        });
-      }
-    });
-
-    const buffer = await pdf.save();
-    return {
-      bytes: new Uint8Array(buffer),
-      mimeType: PDF_MIME,
-      pageCount: total,
-      degraded,
-    };
   }
 
   /**
@@ -501,8 +270,9 @@ export class RenderService {
   private coerceCell(value: string | number | boolean | null, type: string): ExcelJS.CellValue {
     if (value === null) return null;
     if (type === 'date') {
-      const d = typeof value === 'string' ? new Date(value) : null;
-      return d && !Number.isNaN(d.getTime()) ? d : String(value);
+      if (typeof value !== 'string') return String(value);
+      if (value.trim() === '') return null;
+      return parseSpreadsheetDate(value) ?? value;
     }
     if (type === 'number') {
       if (typeof value === 'string' && value.trim() === '') return null;
@@ -555,91 +325,6 @@ export class RenderService {
       if (timer) clearTimeout(timer);
     }
   }
-}
-
-/** Greedy word-wrap of a single paragraph to a max width in points. */
-function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
-  if (!text) return [''];
-  const words = text.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [''];
-  const lines: string[] = [];
-  let current = '';
-  for (const word of words) {
-    const candidate = current ? `${current} ${word}` : word;
-    if (font.widthOfTextAtSize(candidate, size) <= maxWidth || !current) {
-      // If a single word is itself too wide, hard-break it character by character.
-      if (!current && font.widthOfTextAtSize(word, size) > maxWidth) {
-        for (const chunk of hardBreak(word, font, size, maxWidth)) lines.push(chunk);
-        current = '';
-        continue;
-      }
-      current = candidate;
-    } else {
-      lines.push(current);
-      current = word;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
-/** Breaks an overlong unbreakable token into width-bounded chunks. */
-function hardBreak(word: string, font: PDFFont, size: number, maxWidth: number): string[] {
-  const chunks: string[] = [];
-  let current = '';
-  for (const ch of word) {
-    if (font.widthOfTextAtSize(current + ch, size) > maxWidth && current) {
-      chunks.push(current);
-      current = ch;
-    } else {
-      current += ch;
-    }
-  }
-  if (current) chunks.push(current);
-  return chunks;
-}
-
-/**
- * Replaces characters the StandardFonts (WinAnsi) cannot encode so pdf-lib's
- * drawText never throws on exotic Unicode. Keeps the lightweight engine robust
- * against arbitrary caller content.
- */
-function sanitizeForFont(text: string, supported: Set<number>, onReplacement: () => void): string {
-  let out = '';
-  for (const ch of text) {
-    const cp = ch.codePointAt(0);
-    if (cp === undefined) continue;
-    switch (cp) {
-      case 0x2018: // left single quote
-      case 0x2019: // right single quote
-        out += "'";
-        break;
-      case 0x201c: // left double quote
-      case 0x201d: // right double quote
-        out += '"';
-        break;
-      case 0x2013: // en dash
-      case 0x2014: // em dash
-        out += '-';
-        break;
-      case 0x2026: // ellipsis
-        out += '...';
-        break;
-      case 0x2022: // bullet
-        out += '*';
-        break;
-      default:
-        // Keep printable Latin-1 (U+0020..U+00FF); drop everything else so
-        // pdf-lib's WinAnsi StandardFonts never throw on exotic Unicode.
-        if (cp >= 0x20 && cp <= 0xff && supported.has(cp)) out += ch;
-        else if (/\s/u.test(ch)) out += ' ';
-        else {
-          out += '?';
-          onReplacement();
-        }
-    }
-  }
-  return out;
 }
 
 /**

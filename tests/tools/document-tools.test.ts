@@ -173,7 +173,7 @@ describe('docgen_render_pdf', () => {
         reason: 'template_render_failed',
         missingKey: 'missing',
         recovery: {
-          hint: "Check the template's {{referenced}} fields against the keys present in the data object.",
+          hint: 'Supply the named value, use a dotted path to select text within an object, or replace an unsupported tag. Write &#123;&#123; for literal opening braces in a template.',
         },
       },
     });

@@ -7,6 +7,34 @@ import { describe, expect, it } from 'vitest';
 import { htmlToBlocks, markdownToBlocks } from '@/services/document/html-blocks.js';
 
 describe('markdownToBlocks', () => {
+  it('does not degrade a fence solely because it has a language label', () => {
+    expect(markdownToBlocks('\x60\x60\x60ts\n  text\n\x60\x60\x60').degraded).toBe(false);
+  });
+
+  it('renders inline text, autolinks, and tight and loose task items', () => {
+    const result = markdownToBlocks(
+      '# Release **2.0**\n\n*Italic* and `&copy;` with [a link](https://example.com), <https://example.com>, and \\*escaped\\*.\n\n- [x] Parent\n  - [ ] Child\n    - Grandchild\n\n- [ ] Loose',
+    );
+    expect(result.blocks).toMatchObject([
+      { kind: 'heading', text: 'Release 2.0' },
+      {
+        kind: 'paragraph',
+        text: 'Italic and &copy; with a link (https://example.com), https://example.com, and *escaped*.',
+      },
+      { kind: 'listItem', text: '[x] Parent', depth: 0 },
+      { kind: 'listItem', text: '[ ] Child', depth: 1 },
+      { kind: 'listItem', text: 'Grandchild', depth: 2 },
+      { kind: 'listItem', text: '[ ] Loose', depth: 0 },
+    ]);
+    expect(result.degraded).toBe(false);
+  });
+
+  it('reports images under nested items and renders ordinary raw HTML', () => {
+    expect(markdownToBlocks('- Parent\n  - ![alt](image.png)').degraded).toBe(true);
+    const html = '<p>Hello <strong>world</strong>.</p>';
+    expect(markdownToBlocks(html)).toEqual(htmlToBlocks(html));
+  });
+
   it('linearizes every supported block and flags unsupported inline content', () => {
     const result = markdownToBlocks(`# Heading
 
@@ -30,22 +58,21 @@ const answer = 42;
 <aside>unsupported raw html</aside>`);
 
     expect(result.degraded).toBe(true);
-    expect(result.blocks).toEqual(
-      expect.arrayContaining([
-        { kind: 'heading', level: 1, text: 'Heading' },
-        {
-          kind: 'paragraph',
-          text: 'Paragraph with **bold**, [a link](https://example.com), and ![alt](image.png).',
-        },
-        { kind: 'paragraph', text: 'Quoted text' },
-        { kind: 'listItem', text: 'Third', ordered: true, index: 3 },
-        { kind: 'listItem', text: 'Fourth', ordered: true, index: 4 },
-        { kind: 'paragraph', text: 'const answer = 42;' },
-        { kind: 'tableRow', cells: ['Name', 'Value'], header: true },
-        { kind: 'tableRow', cells: ['alpha', '1'], header: false },
-        { kind: 'rule' },
-      ]),
-    );
+    expect(result.blocks).toEqual([
+      { kind: 'heading', level: 1, text: 'Heading' },
+      {
+        kind: 'paragraph',
+        text: 'Paragraph with bold, a link (https://example.com), and .',
+      },
+      { kind: 'paragraph', text: 'Quoted text' },
+      { kind: 'listItem', text: 'Third', ordered: true, index: 3, depth: 0, continuation: false },
+      { kind: 'listItem', text: 'Fourth', ordered: true, index: 4, depth: 0, continuation: false },
+      { kind: 'pre', text: 'const answer = 42;\n' },
+      { kind: 'tableRow', cells: ['Name', 'Value'], header: true },
+      { kind: 'tableRow', cells: ['alpha', '1'], header: false },
+      { kind: 'rule' },
+      { kind: 'paragraph', text: 'unsupported raw html' },
+    ]);
   });
 
   it('keeps ordinary markdown and whitespace non-degraded', () => {
@@ -55,6 +82,53 @@ const answer = 42;
 });
 
 describe('htmlToBlocks', () => {
+  it('prints link destinations inside preformatted text while preserving its spacing', () => {
+    expect(
+      htmlToBlocks('<pre>  <a href="https://example.com">Source</a>  end</pre>').blocks,
+    ).toEqual([{ kind: 'pre', text: '  Source (https://example.com)  end' }]);
+  });
+
+  it('walks nested wrappers and keeps surrounding text and table rows in order', () => {
+    expect(
+      htmlToBlocks(
+        'Before<section><article><h2>Title</h2><p>Intro</p><table><tr><th>A</th><th>B</th></tr><tr><td>one<br>two</td><td>three</td></tr></table></article></section>After',
+      ),
+    ).toEqual({
+      blocks: [
+        { kind: 'paragraph', text: 'Before' },
+        { kind: 'heading', level: 2, text: 'Title' },
+        { kind: 'paragraph', text: 'Intro' },
+        { kind: 'tableRow', cells: ['A', 'B'], header: true },
+        { kind: 'tableRow', cells: ['one\ntwo', 'three'], header: false },
+        { kind: 'paragraph', text: 'After' },
+      ],
+      degraded: false,
+    });
+  });
+
+  it('keeps text after nested lists on the original item and resumes numbering', () => {
+    expect(
+      htmlToBlocks(
+        '<ol start="3"><li>First<ul><li>Child<ol start="7"><li>Grandchild</li></ol></li></ul>Continued</li><li>Next</li></ol>',
+      ).blocks,
+    ).toMatchObject([
+      { kind: 'listItem', text: 'First', depth: 0, index: 3 },
+      { kind: 'listItem', text: 'Child', depth: 1, ordered: false },
+      { kind: 'listItem', text: 'Grandchild', depth: 2, index: 7 },
+      { kind: 'listItem', text: 'Continued', depth: 0, continuation: true },
+      { kind: 'listItem', text: 'Next', depth: 0, index: 4 },
+    ]);
+  });
+
+  it('detects unquoted style classes and styles in the head', () => {
+    expect(
+      htmlToBlocks(
+        '<html><head><style>p { color: blue }</style></head><body>Visible</body></html>',
+      ),
+    ).toEqual({ blocks: [{ kind: 'paragraph', text: 'Visible' }], degraded: true });
+    expect(htmlToBlocks('<p class=report>Visible</p>').degraded).toBe(true);
+  });
+
   it('preserves supported blocks in order and reports dropped presentation', () => {
     const result = htmlToBlocks(`<!doctype html>
       <html>
@@ -79,9 +153,9 @@ describe('htmlToBlocks', () => {
     expect(result.degraded).toBe(true);
     expect(result.blocks).toEqual([
       { kind: 'heading', level: 2, text: 'Report & Notes' },
-      { kind: 'paragraph', text: 'A < B > C' },
+      { kind: 'paragraph', text: 'A < B\u00a0> C' },
       { kind: 'paragraph', text: 'Quoted text' },
-      { kind: 'listItem', text: 'First', ordered: false, index: 0 },
+      { kind: 'listItem', text: 'First', ordered: false, index: 0, depth: 0, continuation: false },
       { kind: 'rule' },
       { kind: 'spacer' },
       { kind: 'tableRow', cells: ['Name', 'Value'], header: true },
@@ -89,9 +163,9 @@ describe('htmlToBlocks', () => {
     ]);
   });
 
-  it('falls back to a paragraph for unwrapped or unrecognized text', () => {
+  it('collects unwrapped text into a paragraph without adding spaces at inline boundaries', () => {
     expect(htmlToBlocks('Plain &quot;text&quot; with <em>emphasis</em>.')).toEqual({
-      blocks: [{ kind: 'paragraph', text: 'Plain "text" with emphasis .' }],
+      blocks: [{ kind: 'paragraph', text: 'Plain "text" with emphasis.' }],
       degraded: false,
     });
   });
@@ -109,15 +183,13 @@ describe('htmlToBlocks', () => {
     ]);
     expect(
       htmlToBlocks('<p>&lt;&gt;&quot;&#39;&apos;&#x27;&#169;&#x2014;&AMP;x&nbsp;y</p>').blocks,
-    ).toEqual([{ kind: 'paragraph', text: `<>"'''©—&x y` }]);
+    ).toEqual([{ kind: 'paragraph', text: `<>"'''©—&x\u00a0y` }]);
   });
 
-  it('leaves unknown, prototype-named, and out-of-range references verbatim', () => {
+  it('preserves unknown references and applies HTML numeric-reference replacements', () => {
     expect(
       htmlToBlocks('<p>&copy; &constructor; &__proto__; &#0; &#xD800; &#x110000;</p>').blocks,
-    ).toEqual([
-      { kind: 'paragraph', text: '&copy; &constructor; &__proto__; &#0; &#xD800; &#x110000;' },
-    ]);
+    ).toEqual([{ kind: 'paragraph', text: '© &constructor; &__proto__; � � �' }]);
   });
 
   it('strips script, style, head, and comment regions whose closers carry whitespace', () => {
@@ -139,22 +211,20 @@ describe('htmlToBlocks', () => {
     ).toEqual({ blocks: [{ kind: 'paragraph', text: 'Body text' }], degraded: true });
   });
 
-  it('does not let a reassembled <script> pair leak its content past one strip pass', () => {
-    // Stripping the inner <script>x()</script> leaves "<scr" + "ipt>leak()</script>",
-    // which reassembles into a second, genuine <script>leak()</script> pair. A
-    // single-pass strip misses it and "leak()" survives as visible paragraph text.
+  it('uses the parsed tree without reassembling or interpreting malformed tag text', () => {
     const result = htmlToBlocks('<p>Before <scr<script>x()</script>ipt>leak()</script> After</p>');
-    expect(result.blocks).toEqual([{ kind: 'paragraph', text: 'Before After' }]);
-    expect(result.degraded).toBe(true);
+    expect(result).toEqual({
+      blocks: [{ kind: 'paragraph', text: 'Before x()ipt>leak() After' }],
+      degraded: false,
+    });
   });
 
-  it('does not let a reassembled comment leak trailing content past one strip pass', () => {
-    // Stripping the inner <!-- z --> leaves "<!-" + "- X>LEAK -->", which
-    // reassembles into <!-- X>LEAK -->. A single-pass strip removes only up to
-    // the embedded ">" (the tag-stripping regex stops at the first ">"), leaving
-    // "LEAK -->" as visible text.
+  it('omits the parsed comment while preserving the following text', () => {
     const result = htmlToBlocks('<p>Shown <!-<!-- z -->- X>LEAK --> more</p>');
-    expect(result.blocks).toEqual([{ kind: 'paragraph', text: 'Shown more' }]);
+    expect(result).toEqual({
+      blocks: [{ kind: 'paragraph', text: 'Shown - X>LEAK --> more' }],
+      degraded: false,
+    });
   });
 });
 

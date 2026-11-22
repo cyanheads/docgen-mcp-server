@@ -23,7 +23,7 @@
 
 ## Overview
 
-Generate documents from an agent: render HTML, markdown, or template data to PDF, export rows to Excel, and fill PDF forms. Everything renders locally on a bundled stack (pdf-lib, exceljs, marked).
+Render HTML, Markdown, or template data to PDF, export rows to Excel, and fill PDF forms. Rendering runs locally with pdf-lib, ExcelJS, Marked and parse5.
 
 ### Tools
 
@@ -51,9 +51,11 @@ Generate documents from an agent: render HTML, markdown, or template data to PDF
 
 ### `docgen_render_pdf` <sub>tool</sub>
 
-- Provide exactly one `source`: `{ html }`, `{ markdown }`, or `{ template, data }` for `{{key}}` interpolation. `pageOptions` controls page size/orientation, CSS-length margins, headers/footers (`{{page}}`, `{{total}}`, `{{date}}`) and page numbers.
-- Returns a `DocumentEnvelope` with `pageCount`; `degraded: true` means CSS, images or scripts were dropped, or characters were replaced with `?`. The lightweight engine renders headings, paragraphs, lists and tables.
-- Typed failures: `invalid_source`, `template_render_failed`, `document_too_large`, `render_timeout`.
+- Provide one source using `{ html }`, `{ markdown }`, or `{ template, data }`. In templates, `{{customer.name}}` inserts literal text and `{{{section}}}` inserts HTML. To display a literal tag such as `{{#if paid}}` alongside interpolated values, write `&#123;&#123;#if paid}}` in the template.
+- HTML and Markdown share a layout for headings, paragraphs, nested lists, tables and preformatted text. Links print their destinations and task items show their checked state.
+- `pageOptions` controls page size, orientation, margins, headers, footers and page numbers. Headers and footers support `{{page}}`, `{{total}}` and `{{date}}`. If the margins leave too little room for the content, reduce the named margins or choose a larger page.
+- The delivery envelope includes `pageCount`. The engine sets `degraded` when it drops presentation or replaces an unsupported character with `?`. Helvetica can print WinAnsi characters such as `€` and `™`.
+- Typed failures include `invalid_source`, `template_render_failed`, `invalid_page_margins`, `document_too_large` and `render_timeout`.
 
 ---
 
@@ -61,6 +63,7 @@ Generate documents from an agent: render HTML, markdown, or template data to PDF
 
 - Supply at least one sheet with a unique `name` (1–31 characters) and scalar `rows[]`; empty rows yield a header-only sheet. Optional `columns[]` sets headers, type (`string` / `number` / `date` / `boolean`), width and Excel format.
 - Omitted columns use all row keys in first-seen order. Boolean columns accept `true/1/yes/on` and `false/0/no/off`, case-insensitive; other strings stay text.
+- Date columns accept full calendar dates such as `2026-03-04` and date-times such as `2026-03-04T10:00-08:00`. Without an offset, the value is read as UTC. Invalid dates and locale-style strings stay text. Whitespace-only strings produce blank cells.
 - Returns a `DocumentEnvelope` with `sheetCount`. Typed failures: `empty_workbook`, `invalid_sheet_name`, `document_too_large`, `render_timeout`.
 
 ---

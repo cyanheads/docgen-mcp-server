@@ -1,6 +1,6 @@
 # docgen-mcp-server - Directory Structure
 
-Generated on: 2026-11-11 09:09:49
+Generated on: 2026-11-22 01:14:47
 
 ```text
 docgen-mcp-server/
@@ -166,7 +166,9 @@ docgen-mcp-server/
 │   │       ├── form-inventory.ts
 │   │       ├── format-envelope.ts
 │   │       ├── html-blocks.ts
+│   │       ├── pdf-layout.ts
 │   │       ├── render-service.ts
+│   │       ├── render-template.ts
 │   │       ├── render-types.ts
 │   │       ├── source-pdf.ts
 │   │       └── types.ts
@@ -177,12 +179,14 @@ docgen-mcp-server/
 │   ├── fuzz/
 │   │   └── get-document.fuzz.test.ts
 │   ├── integration/
+│   │   ├── pdf-rendering.int.test.ts
 │   │   └── tool-contracts.int.test.ts
 │   ├── resources/
 │   ├── services/
 │   │   ├── document-store.test.ts
 │   │   ├── fetch-guard.test.ts
 │   │   ├── html-blocks.test.ts
+│   │   ├── pdf-layout.test.ts
 │   │   ├── render-service.test.ts
 │   │   └── render-types.test.ts
 │   ├── smoke/

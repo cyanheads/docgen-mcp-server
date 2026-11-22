@@ -17,7 +17,7 @@ import { DocumentEnvelopeSchema } from '@/services/document/types.js';
 export const renderPdfTool = tool('docgen_render_pdf', {
   title: 'Render PDF',
   description:
-    'Render content to a downloadable PDF document. Provide exactly one source: { html } (raw HTML you compose — the recommended path), { markdown } (converted to HTML then rendered), or { template, data } (a {{key}} template filled from a data object, server-owned layout). Control page size, orientation, margins, header/footer, and page numbers via pageOptions. Returns a delivery envelope with a documentId, resource URI, pageCount, byte size, and inline base64 when small enough. The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS. The degraded flag discloses dropped styling or character replacement with ? on any text surface, including headers and footers; smart-punctuation transliteration alone does not set it.',
+    'Render content to a downloadable PDF document. Provide exactly one source: { html } (raw HTML you compose — the recommended path), { markdown } (converted to HTML then rendered), or { template, data } ({{key}} for literal text and {{{key}}} for an HTML fragment). Control page size, orientation, margins, header/footer, and page numbers via pageOptions. Returns a delivery envelope with a documentId, resource URI, pageCount, byte size, and inline base64 when small enough. The lightweight engine renders structured layout (headings, paragraphs, lists, tables) but not arbitrary CSS. The degraded flag discloses dropped styling or character replacement with ? on any text surface, including headers and footers; smart-punctuation transliteration alone does not set it.',
   annotations: { readOnlyHint: false, openWorldHint: false },
   input: z.object({
     source: PdfSourceSchema,
@@ -47,9 +47,16 @@ export const renderPdfTool = tool('docgen_render_pdf', {
     {
       reason: 'template_render_failed',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The template referenced a data key absent from the data object, or was malformed.',
+      when: 'A template path is missing, its value is null or contains an object, or the tag is malformed or unsupported.',
       recovery:
-        "Check the template's {{referenced}} fields against the keys present in the data object.",
+        'Supply the named value, use a dotted path to select text within an object, or replace an unsupported tag. Write &#123;&#123; for literal opening braces in a template.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'invalid_page_margins',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The margins leave too little room for visible content on the requested page.',
+      recovery: 'Reduce the named margins, choose a larger page, or change the page orientation.',
       thrownBy: 'service',
     },
     {

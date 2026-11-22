@@ -18,7 +18,7 @@ import {
   PDFRawStream,
   PDFRef,
 } from 'pdf-lib';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import { RenderService } from '@/services/document/render-service.js';
 import { PageOptionsSchema } from '@/services/document/render-types.js';
@@ -37,24 +37,33 @@ function leadingAscii(bytes: Uint8Array, n: number): string {
   return Buffer.from(bytes.slice(0, n)).toString('latin1');
 }
 
-/** Reads the actual text-show operators emitted by the WinAnsi renderer. */
-async function renderedText(bytes: Uint8Array): Promise<string[]> {
+/** Reads the text matrices and text-show operators emitted by the WinAnsi renderer. */
+async function renderedRuns(bytes: Uint8Array): Promise<{ text: string; x: number; y: number }[]> {
   const pdf = await PDFDocument.load(bytes);
+  const decoder = new TextDecoder('windows-1252');
   return pdf.getPages().flatMap((page) => {
     const contents = page.node.Contents();
-    if (!contents) throw new Error('Expected a page content stream.');
+    if (!contents) return [];
     const references = contents instanceof PDFArray ? contents.asArray() : [contents];
     return references.flatMap((reference) => {
       const stream = pdf.context.lookup(reference);
       if (!(stream instanceof PDFRawStream)) throw new Error('Expected a raw PDF content stream.');
       const operators = Buffer.from(decodePDFRawStream(stream).decode()).toString('latin1');
-      return [...operators.matchAll(/<([0-9A-F]+)> Tj/g)].map((match) =>
-        Buffer.from(match[1]!, 'hex').toString('latin1'),
+      return Array.from(
+        operators.matchAll(/1 0 0 1 (\S+) (\S+) Tm\n<([0-9A-F]*)> Tj/g),
+        ([, x, y, hex]) => {
+          assert(hex !== undefined, 'Expected a PDF text operand.');
+          return { x: Number(x), y: Number(y), text: decoder.decode(Buffer.from(hex, 'hex')) };
+        },
       );
     });
   });
 }
 
+/** Layout tests that only check text keep their assertions independent of coordinates. */
+async function renderedText(bytes: Uint8Array): Promise<string[]> {
+  return (await renderedRuns(bytes)).map(({ text }) => text);
+}
 const defaultPage = PageOptionsSchema.parse({});
 
 describe('RenderService', () => {
@@ -101,6 +110,74 @@ describe('RenderService', () => {
   }
 
   describe('renderPdf', () => {
+    it('lays out explicit line breaks, indentation, table cell lines, and decoded text in PDF streams', async () => {
+      const result = await svc.renderPdf(
+        {
+          html: '<p>line a<br>line b</p><pre>first\n    indented</pre><table><tr><td>cell a<br>cell b</td></tr></table><p>Caf&eacute; &mdash; &copy; 2026 It&rsquo;s &deg;C</p>',
+        },
+        defaultPage,
+        createMockContext(),
+      );
+      expect(await renderedText(result.bytes)).toEqual([
+        'line a',
+        'line b',
+        'first',
+        '    indented',
+        'cell a',
+        'cell b',
+        "Café - © 2026 It's °C",
+      ]);
+      expect(result.degraded).toBe(false);
+    });
+
+    it('discloses replacement of invalid numeric character references', async () => {
+      const result = await svc.renderPdf(
+        { html: '<p>&#0; &#xD800; &#x110000;</p>' },
+        defaultPage,
+        createMockContext(),
+      );
+      expect(await renderedText(result.bytes)).toEqual(['? ? ?']);
+      expect(result.degraded).toBe(true);
+    });
+
+    it('places nested list items and tables at the current item depth in the PDF', async () => {
+      const result = await svc.renderPdf(
+        {
+          html: '<ol start="3"><li>Parent<ul><li>Child<ol start="7"><li>Grandchild</li></ol><table><tr><td><pre>  In cell</pre></td></tr></table></li></ul>Continued</li><li>Sibling</li></ol>',
+        },
+        defaultPage,
+        createMockContext(),
+      );
+      const runs = await renderedRuns(result.bytes);
+      const findRun = (text: string) => {
+        const run = runs.find((entry) => entry.text === text);
+        assert(run, `Missing PDF text ${text}.`);
+        return run;
+      };
+      const parent = findRun('Parent');
+      const child = findRun('Child');
+      const grandchild = findRun('Grandchild');
+      const cell = findRun('  In cell');
+      const continued = findRun('Continued');
+      const sibling = findRun('Sibling');
+      expect(parent.x).toBe(76);
+      expect(child.x).toBeGreaterThan(parent.x);
+      expect(grandchild.x).toBeGreaterThan(child.x);
+      expect(cell.x).toBeGreaterThan(child.x);
+      expect(continued.x).toBe(parent.x);
+      expect(sibling.x).toBe(parent.x);
+      expect(runs.filter(({ text }) => /^\d+\.$/.test(text)).map(({ text }) => text)).toEqual([
+        '3.',
+        '7.',
+        '4.',
+      ]);
+      expect(runs.filter(({ text }) => text.includes('In cell'))).toHaveLength(1);
+      expect(parent.y).toBeGreaterThan(child.y);
+      expect(child.y).toBeGreaterThan(grandchild.y);
+      expect(grandchild.y).toBeGreaterThan(cell.y);
+      expect(cell.y).toBeGreaterThan(continued.y);
+    });
+
     it('renders HTML to a valid PDF (decodes to %PDF- magic bytes)', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
       const result = await svc.renderPdf(
@@ -148,6 +225,196 @@ describe('RenderService', () => {
       ).rejects.toMatchObject({
         data: { reason: 'template_render_failed', missingKey: 'missing' },
       });
+    });
+
+    it('preserves scalar paths, array rendering and encoded literal template braces', async () => {
+      const result = await svc.renderPdf(
+        {
+          template:
+            '<p>{{owner.contacts.0.name}}, {{else}}, {{active}}, {{amount}}, {{items}}, {{invoice..amount}}</p><p>&#123;&#123;#if example}}</p>',
+          data: {
+            owner: { contacts: [{ name: 'Casey' }] },
+            else: 'alternate',
+            active: false,
+            amount: 0,
+            items: [1, null, [2, 3]],
+            invoice: { '': { amount: 42 } },
+            unused: { city: 'Seattle' },
+          },
+        },
+        defaultPage,
+        createMockContext(),
+      );
+      expect(await renderedText(result.bytes)).toEqual([
+        'Casey, alternate, false, 0, 1,,2,3, 42',
+        '{{#if example}}',
+      ]);
+    });
+
+    it('keeps blank pages with insufficient room for visible body text', async () => {
+      for (const html of ['', '<p> </p>']) {
+        const result = await svc.renderPdf(
+          { html },
+          PageOptionsSchema.parse({ margin: { top: '791pt', bottom: '0pt' } }),
+          createMockContext(),
+        );
+        expect(result.pageCount).toBe(1);
+        expect(await renderedText(result.bytes)).toEqual([]);
+      }
+      const result = await svc.renderPdf(
+        { html: '' },
+        PageOptionsSchema.parse({
+          margin: { top: '374pt', bottom: '370pt' },
+          header: 'HDR {{page}}',
+          footer: 'FTR {{page}}/{{total}}',
+        }),
+        createMockContext(),
+      );
+      expect(result.pageCount).toBe(1);
+      expect(await renderedText(result.bytes)).toEqual(['HDR 1', 'FTR 1/1']);
+    });
+
+    it('renders template text literally and permits explicit HTML', async () => {
+      const result = await svc.renderPdf(
+        {
+          template: '<p>{{rule}}</p><p>{{owner}}</p><p>{{entity}}</p>{{{heading}}}<p>{{{raw}}}</p>',
+          data: {
+            rule: 'alert if 3 < x and x > 10',
+            owner: 'R&D <ops@example.com>',
+            entity: '&lt;',
+            heading: '<h1>Agenda</h1>',
+            raw: 'x',
+          },
+        },
+        defaultPage,
+        createMockContext(),
+      );
+      const positions = await renderedRuns(result.bytes);
+      expect(positions.map(({ text }) => text)).toEqual([
+        'alert if 3 < x and x > 10',
+        'R&D <ops@example.com>',
+        '&lt;',
+        'Agenda',
+        'x',
+      ]);
+      const heading = await svc.renderPdf(
+        { html: '<h1>Agenda</h1>' },
+        defaultPage,
+        createMockContext(),
+      );
+      const afterThree = await svc.renderPdf(
+        { html: '<p>A</p><p>B</p><p>C</p><h1>Agenda</h1>' },
+        defaultPage,
+        createMockContext(),
+      );
+      expect((await renderedRuns(heading.bytes))[0]?.y).toBe(708);
+      expect(positions[3]).toEqual((await renderedRuns(afterThree.bytes))[3]);
+      expect(result.degraded).toBe(false);
+    });
+
+    it.each([
+      ['{{#if vip}}VIP{{else}}Standard{{/if}}', '#if vip'],
+      ['{{#each items}}{{this.name}}{{/each}}', '#each items'],
+      ['{{^vip}}', '^vip'],
+      ['{{> footer}}', '> footer'],
+      ['{{/if}}', '/if'],
+      ['{{{{value}}}}', '{{{'],
+    ])('rejects unsupported template tag %s', async (template, tag) => {
+      await expect(
+        svc.renderPdf({ template, data: { vip: false } }, defaultPage, createMockContext()),
+      ).rejects.toMatchObject({ data: { reason: 'template_render_failed', tag } });
+    });
+
+    it.each([{ city: 'Seattle' }, [1, [{ city: 'Seattle' }]]])(
+      'rejects object values in a template',
+      async (address) => {
+        await expect(
+          svc.renderPdf(
+            { template: '<p>{{user.address}}</p>', data: { user: { address } } },
+            defaultPage,
+            createMockContext(),
+          ),
+        ).rejects.toMatchObject({
+          data: { reason: 'template_render_failed', path: 'user.address' },
+        });
+      },
+    );
+
+    it.each([
+      [{ left: '120mm', right: '120mm' }, 'left and right'],
+      [{ top: '400mm' }, 'top and bottom'],
+      [{ top: '791pt', bottom: '0pt' }, 'top and bottom'],
+      [{ left: '611pt', right: '0pt' }, 'left and right'],
+    ] as const)('rejects margins that cannot fit visible body text', async (margin, sides) => {
+      await expect(
+        svc.renderPdf(
+          { html: '<p>Hello world</p>' },
+          PageOptionsSchema.parse({ margin }),
+          createMockContext(),
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining(sides),
+        data: { reason: 'invalid_page_margins' },
+      });
+    });
+
+    it('rejects margins that cannot fit a table glyph and its padding', async () => {
+      await expect(
+        svc.renderPdf(
+          { html: '<table><tr><td>Wide</td></tr></table>' },
+          PageOptionsSchema.parse({ margin: { left: '611pt', right: '0pt' } }),
+          createMockContext(),
+        ),
+      ).rejects.toMatchObject({
+        data: { reason: 'invalid_page_margins', sides: ['left', 'right'] },
+      });
+    });
+
+    it.each(['explicit footer', 'numbered footer'])(
+      'keeps page decorations visible with zero margins using %s',
+      async (kind) => {
+        const result = await svc.renderPdf(
+          { html: '<p>Body</p>' },
+          PageOptionsSchema.parse({
+            margin: { top: '0mm', bottom: '0mm' },
+            header: 'HDR {{page}}',
+            ...(kind === 'explicit footer'
+              ? { footer: 'FTR {{page}}/{{total}}' }
+              : { pageNumbers: true }),
+          }),
+          createMockContext(),
+        );
+        const [body, header, footer] = await renderedRuns(result.bytes);
+        assert(body && header && footer, 'Expected PDF body, header, and footer.');
+        expect(header.text).toBe('HDR 1');
+        expect(footer.text).toBe(kind === 'explicit footer' ? 'FTR 1/1' : 'Page 1 of 1');
+        expect(header.y).toBeLessThanOrEqual(785);
+        expect(header.y - body.y).toBeGreaterThan(11);
+        expect(footer.y).toBeGreaterThan(1);
+        expect(footer.y).toBeLessThan(24);
+      },
+    );
+
+    it('keeps WinAnsi font characters on every PDF text surface', async () => {
+      const text = '€ ™ ‰ Œ Š ƒ';
+      const result = await svc.renderPdf(
+        {
+          html: `<h1>${text}</h1><p>${text}</p><ul><li>${text}</li></ul><table><tr><th>${text}</th></tr><tr><td>${text}</td></tr></table>`,
+        },
+        PageOptionsSchema.parse({ header: text, footer: text }),
+        createMockContext(),
+      );
+      expect(await renderedText(result.bytes)).toEqual([
+        text,
+        text,
+        '•',
+        text,
+        text,
+        text,
+        text,
+        text,
+      ]);
+      expect(result.degraded).toBe(false);
     });
 
     it('sets degraded when HTML carries unsupported styling', async () => {
@@ -1079,20 +1346,33 @@ describe('RenderService', () => {
       expect(ws.getRow(2).getCell(1).value).toBe('not-a-number');
     });
 
-    it('coerces a declared date column from an ISO string to a Date', async () => {
+    it('preserves date-only, explicit offset, and non-string date-column values', async () => {
       const ctx = createMockContext({ tenantId: 't1' });
+      const cases = [
+        ['2026-03-04', new Date('2026-03-04T00:00:00Z')],
+        ['2024-02-29', new Date('2024-02-29T00:00:00Z')],
+        ['2026-03-04T00:15+05:30', new Date('2026-03-03T18:45:00Z')],
+        ['2026-03-04T10:00-0800', new Date('2026-03-04T18:00:00Z')],
+        ['2026-03-04t10:00:23.1234z', new Date('2026-03-04T10:00:23.123Z')],
+        ['2026-03-04T24:00:00.000Z', new Date('2026-03-05T00:00:00Z')],
+        [2024, '2024'],
+        [true, 'true'],
+        [null, null],
+      ] as const;
       const result = await svc.renderSpreadsheet(
         [
           {
             name: 'Dates',
-            rows: [{ d: '2026-01-15' }],
+            rows: cases.map(([d]) => ({ d })),
             columns: [{ key: 'd', header: 'D', type: 'date' }],
           },
         ],
         ctx,
       );
       const ws = await firstSheet(result.bytes);
-      expect(ws.getRow(2).getCell(1).value).toBeInstanceOf(Date);
+      expect(cases.map((_, i) => ws.getCell(i + 2, 1).value)).toEqual(
+        cases.map(([, expected]) => expected),
+      );
     });
 
     it('coerces a boolean column from truthy/falsy values', async () => {
@@ -1133,7 +1413,6 @@ describe('RenderService', () => {
   describe('PDF layout edge cases', () => {
     it.each([
       { html: '<p>你好</p>' },
-      { html: '<p>€</p>' },
       { html: '<p>\u0080</p>' },
       { html: '<ul><li>你好</li></ul>' },
       { html: '<table><tr><th>你好</th></tr><tr><td>你好</td></tr></table>' },

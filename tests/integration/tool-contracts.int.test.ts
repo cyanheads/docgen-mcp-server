@@ -6,9 +6,10 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
+import ExcelJS from 'exceljs';
 import { Lexer, type Tokens } from 'marked';
 import { PDFDocument, PDFHexString, PDFName } from 'pdf-lib';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, assert, beforeEach, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import { exportSpreadsheetTool } from '@/mcp-server/tools/definitions/export-spreadsheet.tool.js';
 import { fillFormTool } from '@/mcp-server/tools/definitions/fill-form.tool.js';
@@ -17,6 +18,51 @@ import { listFormFieldsTool } from '@/mcp-server/tools/definitions/list-form-fie
 import { renderPdfTool } from '@/mcp-server/tools/definitions/render-pdf.tool.js';
 import { getDocumentStore, initDocumentStore } from '@/services/document/document-store.js';
 import { initRenderService } from '@/services/document/render-service.js';
+
+it('exports offsetless dates as UTC, invalid dates as text, and blank dates as empty cells', async () => {
+  const cases = [
+    ['2026-03-04T10:00', new Date('2026-03-04T10:00Z')],
+    ['2026-03-04T10:00:23.456', new Date('2026-03-04T10:00:23.456Z')],
+    ['12', '12'],
+    ['03/04/2026', '03/04/2026'],
+    ['March 4, 2026', 'March 4, 2026'],
+    ['2026-02-30', '2026-02-30'],
+    ['2026-02-29T10:00+03:00', '2026-02-29T10:00+03:00'],
+    ['2026-03-04T24:00:00.0001Z', '2026-03-04T24:00:00.0001Z'],
+    ['2026-03-04T23:59:60Z', '2026-03-04T23:59:60Z'],
+    ['2026-03-04T10:00+24:00', '2026-03-04T10:00+24:00'],
+    ['2026-03', '2026-03'],
+    ['2026', '2026'],
+    [' 2026-03-04 ', ' 2026-03-04 '],
+    ['', null],
+    ['  ', null],
+  ] as const;
+  const result = await runToolContract(exportSpreadsheetTool, {
+    sheets: [
+      {
+        name: 'Dates',
+        rows: cases.map(([date], id) => ({ date, id })),
+        columns: [
+          { key: 'date', header: 'Date', type: 'date' },
+          { key: 'id', header: 'ID', type: 'number' },
+        ],
+      },
+    ],
+  });
+  expect(result.isError).not.toBe(true);
+  const { document } = exportSpreadsheetTool.output.parse(result.structuredContent);
+  const text = result.content.find((block) => block.type === 'text')?.text;
+  assert(document.inlineBase64 !== undefined, 'Expected inline spreadsheet bytes.');
+  expect(text?.split('\n')).toContain(`**Inline document (base64):** ${document.inlineBase64}`);
+  const workbook = new ExcelJS.Workbook();
+  const bytes = Buffer.from(document.inlineBase64, 'base64');
+  await workbook.xlsx.load(bytes as unknown as Parameters<ExcelJS.Workbook['xlsx']['load']>[0]);
+  const sheet = workbook.getWorksheet('Dates');
+  assert(sheet, 'Expected the Dates worksheet.');
+  expect(cases.map((_, index) => sheet.getCell(index + 2, 1).value)).toEqual(
+    cases.map(([, expected]) => expected),
+  );
+});
 
 it('distinguishes domain validation from malformed arguments on both surfaces', async () => {
   for (const [input, code, reason] of [
@@ -80,6 +126,14 @@ function assertDomainFailure(
 it('covers semantic service failures and keeps their recovery on both surfaces', async () => {
   for (const [input, reason] of [
     [{ source: { template: '{{a.b.c}}', data: { a: { b: {} } } } }, 'template_render_failed'],
+    [
+      { source: { template: '{{#if vip}}VIP{{/if}}', data: { vip: false } } },
+      'template_render_failed',
+    ],
+    [
+      { source: { html: '<p>Body</p>' }, pageOptions: { margin: { top: '400mm' } } },
+      'invalid_page_margins',
+    ],
     [{ source: { html: 'body', data: {} } }, 'invalid_source'],
   ] as const) {
     const result = await runToolContract(renderPdfTool, input);
@@ -103,6 +157,21 @@ it('covers semantic service failures and keeps their recovery on both surfaces',
     'document_too_large',
     renderPdfTool.errors?.find((entry) => entry.reason === 'document_too_large')
       ?.recovery as string,
+  );
+});
+
+it('returns the rendered PDF envelope and WinAnsi status on both production surfaces', async () => {
+  const result = await runToolContract(renderPdfTool, {
+    source: { template: '<p>{{amount}}</p>', data: { amount: '€5' } },
+  });
+  expect(result.structuredContent).toMatchObject({ document: { pageCount: 1 }, degraded: false });
+  expect(result.content).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining('**degraded:** false'),
+      }),
+    ]),
   );
 });
 

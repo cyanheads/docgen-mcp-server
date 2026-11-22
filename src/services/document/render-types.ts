@@ -33,11 +33,15 @@ export const PdfSourceSchema = z
     template: z
       .string()
       .optional()
-      .describe('A Handlebars-style template string filled with `data`. Server owns layout.'),
+      .describe(
+        'HTML template with {{key}} or {{a.b}} for literal text and {{{key}}} for an explicit HTML fragment. Block, inverse and partial tags are unsupported.',
+      ),
     data: z
       .record(z.string(), z.unknown())
       .optional()
-      .describe('Key/value data interpolated into `template`. Extra keys are ignored.'),
+      .describe(
+        'Key/value data interpolated into `template`. Referenced values can be strings, numbers, booleans, or arrays of scalars rendered with commas. Use dotted paths to read fields within objects. Extra keys are ignored.',
+      ),
   })
   .describe(
     'The document source — provide exactly ONE of: { html }, { markdown }, or { template, data }.',
@@ -61,7 +65,9 @@ export const PageOptionsSchema = z
         left: lengthString('Left margin, e.g. "10mm".').optional(),
       })
       .optional()
-      .describe('Page margins; each side is a CSS length like "10mm", "0.5in", or "72pt".'),
+      .describe(
+        'Page margins as CSS lengths like "10mm", "0.5in", or "72pt". Leave enough space for the body and active header, footer, or page numbers.',
+      ),
     header: z
       .string()
       .optional()
@@ -93,7 +99,7 @@ export const ColumnSpecSchema = z
       .enum(['string', 'number', 'date', 'boolean'])
       .default('string')
       .describe(
-        'Cell value type. `date` parses ISO 8601 strings; numeric dates remain decimal text. Blank numeric strings become blank cells. Boolean strings are trimmed and case-insensitive: true/1/yes/on and false/0/no/off/empty; unknown strings remain text.',
+        'Cell value type. `date` accepts YYYY-MM-DD, optionally followed by THH:MM, optional seconds and fractional seconds, and Z or a signed HH:MM or HHMM offset. Date-only and offsetless inputs use UTC. Invalid date strings stay text and numeric dates stay decimal text. Empty or whitespace-only date and number strings become blank cells. Boolean strings are trimmed and case-insensitive: true/1/yes/on and false/0/no/off/empty; unknown strings remain text.',
       ),
     width: z.number().positive().optional().describe('Column width in character units.'),
     format: z
